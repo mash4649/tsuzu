@@ -193,6 +193,11 @@ class CanonicalStore:
                 current = self.inspect_canonical(intent.object_type, intent.object_id)
                 if current.status != "VALID":
                     return CommitResult("CANONICAL_CORRUPT", intent.object_type, intent.object_id, reason=current.reason)
+                from .deletion import NOT_DELETED, DeletionResolver
+
+                deletion = DeletionResolver(self.locator).resolve(intent.object_type, intent.object_id)
+                if deletion.state != NOT_DELETED and deletion.reason != "MANIFEST":
+                    return CommitResult("DELETED" if deletion.state == "DELETED" else "DELETION_UNKNOWN", intent.object_type, intent.object_id, current.revision, reason=deletion.reason)
                 if current.revision != intent.expected_revision:
                     return CommitResult("REVISION_CONFLICT", intent.object_type, intent.object_id, current.revision)
                 manifest = _manifest_at(final)

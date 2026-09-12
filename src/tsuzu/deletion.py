@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .source import SourceValidationError, parse_source, validate_payload, validate_source
-from .vault import ActiveVaultLocator
+from .vault import ActiveVaultLocator, LocatorError
 from .writer import AtomicSourceWriter, WriterError, shared_writer_lock
 
 if TYPE_CHECKING:
@@ -106,7 +106,7 @@ class DeletionResolver:
                     return DeletionResolution(UNKNOWN_FAIL_CLOSED, "DELETION_LEDGER_CORRUPT", record_path)
                 return DeletionResolution(DELETED, "DELETION_LEDGER", record_path)
             return self._resolve_manifest(object_type, object_id, handle.root_ref)
-        except (OSError, SourceValidationError, KeyError, TypeError, ValueError):
+        except (OSError, LocatorError, SourceValidationError, KeyError, TypeError, ValueError):
             return DeletionResolution(UNKNOWN_FAIL_CLOSED, "DELETION_LEDGER_UNAVAILABLE")
 
     def delete_source(self, request: DeletionRequest, *, index: "IndexManager | None" = None) -> DeletionResult:
@@ -159,6 +159,44 @@ class DeletionResolver:
                 return DeletionResult("DELETED_INDEX_PENDING", "SOURCE", source_id, updated.revision, updated.path, str(exc))
         return DeletionResult("DELETED", "SOURCE", source_id, updated.revision, updated.path)
 
+    def delete(self, request: DeletionRequest) -> DeletionResult:
+        """Commit a generic C3 deletion fact; SOURCE keeps its A6 specialization."""
+        if request.object_type == "SOURCE":
+            return self.delete_source(request)
+        try:
+            _validate_request(request)
+        except SourceValidationError as exc:
+            return DeletionResult("VALIDATION_FAILED", request.object_type, request.object_id, reason=str(exc))
+        try:
+            with shared_writer_lock(self.locator) as handle:
+                root = handle.root_ref
+                object_path = root / "canonical" / "objects" / request.object_type / request.object_id
+                if object_path.is_symlink() or (object_path / "object.md").is_symlink():
+                    return DeletionResult("CANONICAL_CORRUPT", request.object_type, request.object_id, path=object_path)
+                manifest = _read_manifest(object_path / "object.md")
+                if manifest.get("object_type") != request.object_type or manifest.get("object_id") != request.object_id:
+                    return DeletionResult("CANONICAL_CORRUPT", request.object_type, request.object_id, path=object_path)
+                revision = manifest.get("revision")
+                if not isinstance(revision, int):
+                    return DeletionResult("CANONICAL_CORRUPT", request.object_type, request.object_id, path=object_path)
+                if revision != request.expected_revision:
+                    return DeletionResult("REVISION_CONFLICT", request.object_type, request.object_id, revision, object_path)
+                ledger_path = _ledger_path(root, request.object_type, request.object_id)
+                if ledger_path.exists():
+                    try:
+                        _validate_record(_read_record(ledger_path), request.object_type, request.object_id)
+                    except (OSError, SourceValidationError, KeyError, TypeError, ValueError) as exc:
+                        return DeletionResult("DELETION_LEDGER_CONFLICT", request.object_type, request.object_id, revision, ledger_path, str(exc))
+                    return DeletionResult("ALREADY_DELETED", request.object_type, request.object_id, revision, ledger_path)
+                record = _generic_record(manifest, request)
+                _atomic_record_write(root, ledger_path, record)
+                _validate_record(_read_record(ledger_path), request.object_type, request.object_id)
+                return DeletionResult("DELETED", request.object_type, request.object_id, revision, ledger_path)
+        except WriterError as exc:
+            return DeletionResult(exc.status, request.object_type, request.object_id, reason=exc.reason)
+        except (OSError, SourceValidationError) as exc:
+            return DeletionResult("IO_FAILED", request.object_type, request.object_id, reason=str(exc))
+
     def reconcile_source(self, source_id: str) -> DeletionResult:
         state = self.resolve_source(source_id)
         if state.state != DELETED:
@@ -194,6 +232,24 @@ class DeletionResolver:
             return DeletionResult("PURGED", "SOURCE", source_id)
         except OSError as exc:
             return DeletionResult("PURGE_FAILED", "SOURCE", source_id, reason=str(exc))
+
+    def purge(self, object_type: str, object_id: str) -> DeletionResult:
+        """Attempt normal active-store payload removal without changing deletion truth."""
+        if object_type == "SOURCE":
+            return self.purge_source_payload(object_id)
+        state = self.resolve(object_type, object_id)
+        if state.state != DELETED:
+            return DeletionResult(state.state, object_type, object_id, reason=state.reason)
+        try:
+            payload = self.locator.resolve_active_vault().root_ref / "canonical" / "objects" / object_type / object_id / "payload" / "original"
+            if payload.is_symlink():
+                return DeletionResult("PURGE_FAILED", object_type, object_id, reason="payload is symlink")
+            if payload.exists():
+                payload.unlink()
+                _fsync_dir(payload.parent)
+            return DeletionResult("PURGED", object_type, object_id)
+        except OSError as exc:
+            return DeletionResult("PURGE_FAILED", object_type, object_id, reason=str(exc))
 
     def _resolve_manifest(self, object_type: str, object_id: str, root: Path) -> DeletionResolution:
         if object_type == "SOURCE":
@@ -233,6 +289,28 @@ def _source_record(manifest: dict[str, object], request: DeletionRequest) -> dic
         "request": {
             "request_id": request.request_id,
             "idempotency_key_hash": hashlib.sha256(request.idempotency_key.encode()).hexdigest(),
+        },
+        "reason_code": request.reason_code,
+    }
+
+
+def _generic_record(manifest: dict[str, object], request: DeletionRequest) -> dict[str, object]:
+    payload = manifest.get("payload")
+    content_hash = payload.get("sha256") if isinstance(payload, dict) and isinstance(payload.get("sha256"), str) else _content_hash(manifest)
+    return {
+        "record_type": "DELETION_RECORD",
+        "ledger_schema_version": "2.0.0",
+        "record_id": str(uuid.uuid4()),
+        "target": {"object_type": request.object_type, "object_id": request.object_id},
+        "deleted_at": request.requested_at,
+        "deleted_by": {"actor": request.actor, "method": request.method},
+        "request": {
+            "request_id": request.request_id,
+            "idempotency_key_hash": hashlib.sha256(request.idempotency_key.encode()).hexdigest(),
+        },
+        "snapshot": {
+            "revision_at_delete": manifest["revision"],
+            "content_hash": content_hash,
         },
         "reason_code": request.reason_code,
     }
@@ -296,6 +374,14 @@ def _validate_record(record: dict[str, object], object_type: str, object_id: str
         snapshot = record.get("source_snapshot") or record.get("snapshot")
         if not isinstance(snapshot, dict) or not isinstance(snapshot.get("revision_at_delete"), int) or not isinstance(snapshot.get("payload_sha256"), str) or len(snapshot["payload_sha256"]) != 64:
             raise SourceValidationError("invalid Source deletion snapshot")
+    elif record["ledger_schema_version"] != "2.0.0":
+        raise SourceValidationError("generic deletion requires ledger v2")
+    else:
+        snapshot = record.get("snapshot")
+        if not isinstance(snapshot, dict) or set(snapshot) != {"revision_at_delete", "content_hash"} or not isinstance(snapshot["revision_at_delete"], int):
+            raise SourceValidationError("invalid deletion snapshot")
+        if snapshot["content_hash"] is not None and (not isinstance(snapshot["content_hash"], str) or len(snapshot["content_hash"]) != 64):
+            raise SourceValidationError("invalid deletion content hash")
 
 
 def _read_source(path: Path, source_id: str) -> dict[str, object]:
@@ -309,6 +395,8 @@ def _read_source(path: Path, source_id: str) -> dict[str, object]:
 
 
 def _read_manifest(path: Path) -> dict[str, object]:
+    if path.is_symlink():
+        raise SourceValidationError("object manifest is symlink")
     document = path.read_text(encoding="utf-8")
     if not document.startswith("---\n") or "\n---\n" not in document:
         raise SourceValidationError("invalid object manifest")
@@ -377,6 +465,10 @@ def _timestamp(value: object) -> None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _content_hash(manifest: dict[str, object]) -> str:
+    return hashlib.sha256(json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _record_deleted_at(locator: ActiveVaultLocator, source_id: str) -> str:

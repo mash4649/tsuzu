@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tsuzu.canonical import CanonicalStore, CreateCanonicalIntent, ObjectRegistration, ObjectRegistry, UpdateCanonicalIntent
 from tsuzu.deletion import DELETED, NOT_DELETED, UNKNOWN_FAIL_CLOSED, DeletionRequest, DeletionResolver
 from tsuzu.index import IndexManager
 from tsuzu.vault import ActiveVaultLocator
@@ -60,6 +61,45 @@ class DeletionTests(unittest.TestCase):
         result = self.resolver.delete_source(DeletionRequest.source(self.source_id, expected_revision=2))
         self.assertEqual(result.status, "REVISION_CONFLICT")
         self.assertFalse((self.locator.resolve_active_vault().root_ref / "system/deletion-ledger").exists())
+
+    def test_purge_failure_cannot_reverse_deletion_truth(self):
+        self.assertEqual(self.resolver.delete_source(DeletionRequest.source(self.source_id, expected_revision=1)).status, "DELETED")
+        payload = self.writer.inspect_source(self.source_id).path / "payload/original"
+        payload.unlink()
+        payload.symlink_to("missing")
+        result = self.resolver.purge_source_payload(self.source_id)
+        self.assertEqual(result.status, "PURGE_FAILED")
+        self.assertEqual(self.resolver.resolve_source(self.source_id).state, DELETED)
+
+    def test_generic_ledger_blocks_c1_update_without_resurrecting_object(self):
+        object_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        registry = ObjectRegistry()
+        registry.register(
+            ObjectRegistration(
+                object_type="EVIDENCE",
+                storage_class="CANONICAL",
+                mutability="REVISIONED",
+                body_mode="NONE",
+                schema_owner="B4",
+                mutable_fields=frozenset({"sensitivity"}),
+            )
+        )
+        store = CanonicalStore(self.locator, registry)
+        fields = {
+            "scope": {"scope_type": "GLOBAL", "scope_id": None},
+            "provenance": {"origin": "USER_EXPLICIT", "source_refs": [], "actor": "USER", "explicitness": "EXPLICIT"},
+            "trust": {"level": "ASSERTED", "confidence": 1.0},
+            "sensitivity": {"level": "PERSONAL"},
+            "temporal": {"valid_from": None, "valid_until": None},
+            "deletion": {"state": "LIVE", "tombstoned_at": None},
+        }
+        created = store.create_canonical(CreateCanonicalIntent("EVIDENCE", object_id, "1.0.0", "2026-09-12T00:00:00.000Z", "create-evidence", fields))
+        self.assertEqual(created.status, "COMMITTED_LOCAL")
+        deleted = self.resolver.delete(DeletionRequest("EVIDENCE", object_id, 1, "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "delete-evidence", "2026-09-12T00:01:00.000Z"))
+        self.assertEqual(deleted.status, "DELETED")
+        self.assertEqual(self.resolver.resolve("EVIDENCE", object_id).state, DELETED)
+        update = store.update_canonical(UpdateCanonicalIntent("EVIDENCE", object_id, 1, "update-evidence", {"sensitivity": {"level": "SENSITIVE"}}))
+        self.assertEqual(update.status, "DELETED")
 
 
 if __name__ == "__main__":
