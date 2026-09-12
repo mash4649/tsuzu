@@ -9,6 +9,7 @@ from tsuzu.claude_adapter import ClaudeHostAdapter, ClaudeMcpServer, McpInputErr
 from tsuzu.context import ContextBundleBuilder
 from tsuzu.index import IndexManager
 from tsuzu.retrieval import RetrievalService
+from tsuzu.__main__ import build_parser
 from tsuzu.vault import ActiveVaultLocator
 from tsuzu.writer import AtomicSourceWriter
 
@@ -80,6 +81,20 @@ class ClaudeHostAdapterTests(unittest.TestCase):
         self.assertFalse(_version_at_least("2.1.193", (2, 1, 199)))
         self.assertTrue(_version_at_least("2.1.199", (2, 1, 199)))
 
+    def test_codex_host_uses_its_own_verified_capability(self):
+        registry = CapabilityRegistry()
+        registry.publish(CapabilityReport("codex", "CODEX", "0.144.1", "2026-09-13T00:00:00Z", "test", (Capability(EXPLICIT_RECALL, VERIFIED, ("GLOBAL",)),), "TRUSTED_EXTERNAL"))
+        adapter = ClaudeHostAdapter(
+            RetrievalService(self.index),
+            ContextBundleBuilder(self.locator, Path(self.temp.name) / "runtime-codex"),
+            registry,
+            adapter_id="codex",
+        )
+
+        self.assertEqual(adapter.adapter_id, "codex")
+        self.assertNotIn("anthropic/requiresUserInteraction", adapter.tool_definitions()[0]["_meta"])
+        self.assertEqual(adapter.recall({"query": "absent"})["structuredContent"]["status"], "NO_ELIGIBLE_CONTEXT")
+
     def test_stdio_protocol_discovers_one_tool_and_rejects_invalid_args(self):
         server = ClaudeMcpServer(self.adapter)
         inbound = io.StringIO(
@@ -93,6 +108,12 @@ class ClaudeHostAdapterTests(unittest.TestCase):
         discovery, invalid = [json.loads(line) for line in outbound.getvalue().splitlines()]
         self.assertEqual([tool["name"] for tool in discovery["result"]["tools"]], ["tsuzu_recall"])
         self.assertEqual(invalid["error"]["code"], -32602)
+
+    def test_cli_accepts_codex_host(self):
+        args = build_parser().parse_args([
+            "mcp", "serve", "--host", "codex", "--control-root", "control", "--index-root", "index", "--runtime-root", "runtime",
+        ])
+        self.assertEqual(args.host, "codex")
 
 
 if __name__ == "__main__":
