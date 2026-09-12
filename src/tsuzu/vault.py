@@ -173,6 +173,7 @@ class ActiveVaultLocator:
         with self._locked():
             record = self._read_record()
         root = Path(record["active"]["root_ref"])
+        self._verify_root_binding(record, root)
         report = self.preflight_vault(root)
         if not report.supported:
             raise LocatorError(f"active Vault is unavailable: {report.reason}")
@@ -230,6 +231,15 @@ class ActiveVaultLocator:
                 record = self._read_record()
             active = record["active"]
             capabilities = record["capabilities"]
+            root = Path(active["root_ref"])
+            if not root.exists():
+                return LocatorHealth(
+                    "DEGRADED",
+                    generation=active["generation"],
+                    vault_id=active["vault_id"],
+                    reason="active Vault root is unavailable",
+                )
+            self._verify_root_binding(record, root)
             report = self.preflight_vault(active["root_ref"])
             if not report.supported:
                 return LocatorHealth(
@@ -327,6 +337,19 @@ class ActiveVaultLocator:
             capability_report_hash=active["capability_report_hash"],
             resolved_at=record["updated_at"],
         )
+
+    @staticmethod
+    def _verify_root_binding(record: dict[str, object], root: Path) -> None:
+        active = record["active"]
+        try:
+            resolved = root.resolve(strict=True)
+            volume_identity = str(resolved.stat().st_dev)
+        except OSError as exc:
+            raise LocatorError("active Vault root is unavailable") from exc
+        if ActiveVaultLocator._root_fingerprint(resolved) != active["root_fingerprint"]:
+            raise LocatorError("active Vault root fingerprint mismatch")
+        if volume_identity != active["volume_identity"]:
+            raise LocatorError("active Vault volume identity mismatch")
 
     @staticmethod
     def _unsupported(reason: str) -> CapabilityReport:

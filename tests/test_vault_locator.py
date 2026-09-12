@@ -110,6 +110,19 @@ class ActiveVaultLocatorTests(unittest.TestCase):
         self.assertEqual(health.status, "DEGRADED")
         self.assertFalse(health.capabilities_supported)
 
+    def test_root_reference_tampering_fails_closed(self):
+        other = Path(self.temp.name) / "other-vault"
+        other.mkdir()
+        self.locator.initialize(self.root, operation_id="init-a")
+        path = self.state / "active-vault.json"
+        record = json.loads(path.read_text())
+        record["active"]["root_ref"] = str(other.resolve())
+        path.write_text(json.dumps(record))
+
+        self.assertEqual(self.locator.inspect_locator().status, "CORRUPT")
+        with self.assertRaises(LocatorError):
+            self.locator.resolve_active_vault()
+
 
 if __name__ == "__main__":
     unittest.main()
