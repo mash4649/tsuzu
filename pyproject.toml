@@ -5,5 +5,8 @@ description = "Local-first TSUZU MVP runtime"
 requires-python = ">=3.12"
 dependencies = []
 
+[project.scripts]
+tsuzu = "tsuzu.__main__:main"
+
 [tool.tsuzu]
 test-command = "PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'"
