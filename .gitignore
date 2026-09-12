@@ -3,3 +3,12 @@
 .dolt/
 *.db
 .beads-credential-key
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+.env
+.env.*

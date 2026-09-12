@@ -1,0 +1,9 @@
+[project]
+name = "tsuzu"
+version = "0.1.0"
+description = "Local-first TSUZU MVP runtime"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.tsuzu]
+test-command = "PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'"
