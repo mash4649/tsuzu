@@ -78,11 +78,16 @@ class ApprovedCandidate:
     content: str | dict[str, str]
     content_role: str = "UNTRUSTED_DATA"
     policy_version: str = POLICY_VERSION
+    policy_decision_id: str = ""
 
 
 @dataclass(frozen=True)
 class RetrievalResult:
     status: str
+    query: str
+    destination_id: str
+    destination_class: str
+    effective_scope: Scope
     approved: tuple[ApprovedCandidate, ...]
     decisions: tuple[tuple[str, str], ...]
     policy_manifest: dict[str, object]
@@ -209,11 +214,13 @@ class RetrievalService:
         else:
             content_mode = "METADATA_ONLY"
             content = {"original_name": source["original_name"] or "", "kind": source["kind"], "media_type": source["media_type"]}
-        return ApprovedCandidate(request.request_id, source_id, manifest["revision"], source["payload_sha256"], query_mode, rank, destination.destination_id, destination.destination_class, sensitivity, scope, content_mode, content), ""
+        decision_id = hashlib.sha256(f"{request.request_id}:{source_id}:{manifest['revision']}:{POLICY_VERSION}".encode()).hexdigest()
+        return ApprovedCandidate(request.request_id, source_id, manifest["revision"], source["payload_sha256"], query_mode, rank, destination.destination_id, destination.destination_class, sensitivity, scope, content_mode, content, policy_decision_id=decision_id), ""
 
     def _result(self, status: str, approved: tuple[ApprovedCandidate, ...], decisions: tuple[tuple[str, str], ...], request: RetrievalRequest, destination: Destination | None) -> RetrievalResult:
         manifest = {"request_id": request.request_id, "policy_version": POLICY_VERSION, "destination_id": request.destination_id, "destination_class": destination.destination_class if destination else DESTINATION_UNKNOWN_EXTERNAL, "capability": request.capability, "evaluated_at": _now(), "approved_count": len(approved), "decision_hash": hashlib.sha256(repr(decisions).encode()).hexdigest()}
-        return RetrievalResult(status, approved, decisions, manifest)
+        scope = request.requested_scope or request.granted_scope
+        return RetrievalResult(status, request.query, request.destination_id, manifest["destination_class"], scope, approved, decisions, manifest)
 
 
 def _terms(query: str) -> tuple[str, ...]:
