@@ -41,6 +41,16 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual(result.approved[0].source_id, source_id)
         self.assertEqual(result.approved[0].content_role, "UNTRUSTED_DATA")
 
+    def test_codex_personal_recall_uses_the_same_external_egress_policy(self):
+        source_id = "23222222-2222-4222-8222-222222222222"
+        self.capture(source_id, "Codex explicit recall fixture")
+
+        result = RetrievalService(self.index).retrieve(self.request("explicit recall", "codex"))
+
+        self.assertEqual(result.status, "OK")
+        self.assertEqual(result.approved[0].destination_id, "codex")
+        self.assertEqual(result.approved[0].destination_class, "TRUSTED_EXTERNAL")
+
     def test_sensitive_external_and_unknown_destination_are_denied(self):
         source_id = "33333333-3333-4333-8333-333333333333"
         self.capture(source_id, "機密の予算資料", "SENSITIVE")
