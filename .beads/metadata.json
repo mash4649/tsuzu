@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "tsuzu_main",
+  "project_id": "569bfbdf-696d-4d10-b514-b2581b063239"
+}
