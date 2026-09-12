@@ -235,23 +235,8 @@ class AtomicSourceWriter:
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[VaultHandle]:
-        handle = self.locator.resolve_active_vault()
-        system = self._system_root(handle)
-        if system.is_symlink():
-            raise WriterError("FILESYSTEM_UNSUPPORTED", "Vault system directory is symlink")
-        system.mkdir(parents=True, exist_ok=True, mode=0o700)
-        lock_path = system / "write.lock"
-        if lock_path.is_symlink():
-            raise WriterError("FILESYSTEM_UNSUPPORTED", "writer lock is symlink")
-        with lock_path.open("a+") as lock:
-            try:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise WriterError("WRITER_BUSY", "writer lock is busy") from exc
-            try:
-                yield handle
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        with shared_writer_lock(self.locator) as handle:
+            yield handle
 
     def _canonical_root(self, handle: VaultHandle | None = None) -> Path:
         handle = handle or self.locator.resolve_active_vault()
@@ -350,3 +335,25 @@ def _validate_source_id(source_id: str) -> None:
 
 def _as_bytes(payload: bytes | str) -> bytes:
     return payload.encode("utf-8") if isinstance(payload, str) else payload
+
+
+@contextlib.contextmanager
+def shared_writer_lock(locator: ActiveVaultLocator) -> Iterator[VaultHandle]:
+    """The one mutable-writer lock shared by A2 and C1."""
+    handle = locator.resolve_active_vault()
+    system = handle.root_ref / "system"
+    if system.is_symlink():
+        raise WriterError("FILESYSTEM_UNSUPPORTED", "Vault system directory is symlink")
+    system.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_path = system / "write.lock"
+    if lock_path.is_symlink():
+        raise WriterError("FILESYSTEM_UNSUPPORTED", "writer lock is symlink")
+    with lock_path.open("a+") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise WriterError("WRITER_BUSY", "writer lock is busy") from exc
+        try:
+            yield handle
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
