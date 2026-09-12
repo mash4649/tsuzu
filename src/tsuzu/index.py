@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .capture import SecretScanner
+from .deletion import DELETED, NOT_DELETED, UNKNOWN_FAIL_CLOSED, DeletionResolver
 from .source import SourceValidationError, parse_source, validate_payload, validate_source
 from .vault import ActiveVaultLocator
 
@@ -60,12 +61,14 @@ class IndexManager:
         locator: ActiveVaultLocator,
         *,
         scanner: SecretScanner | None = None,
+        deletion_resolver: DeletionResolver | None = None,
         max_text_file_bytes: int = 4 * 1024 * 1024,
     ):
         probe_sqlite()
         self.root = Path(index_root)
         self.locator = locator
         self.scanner = scanner or SecretScanner()
+        self.deletion = deletion_resolver or DeletionResolver(locator)
         self.max_text_file_bytes = max_text_file_bytes
         self.path = self.root / "tsuzu.sqlite"
         self.lock_path = self.root / "index.lock"
@@ -186,7 +189,7 @@ class IndexManager:
             rows = connection.execute("SELECT source_id FROM source_fts WHERE source_fts MATCH ?", (fts_query,)).fetchall()
         else:
             rows = connection.execute("SELECT source_id FROM source_fts WHERE name LIKE ? OR body LIKE ?", (f"%{query}%", f"%{query}%")).fetchall()
-        return [row[0] for row in rows]
+        return [source_id for row in rows if (source_id := row[0]) and self.deletion.resolve_source(source_id).state == NOT_DELETED]
 
     def full_rebuild(self) -> None:
         self._require_open()
@@ -237,6 +240,12 @@ class IndexManager:
             path = handle.root_ref / "canonical" / "sources" / source_id
             if path.is_symlink() or (path / "source.md").is_symlink() or (path / "payload").is_symlink() or (path / "payload" / "original").is_symlink():
                 return {"eligible": False, "revision": None, "reason": "CORRUPT_CANONICAL"}
+            deletion = self.deletion.resolve_source(source_id)
+            if deletion.state == DELETED:
+                reason = "DELETION_LEDGER" if deletion.reason == "DELETION_LEDGER" else "TOMBSTONED"
+                return {"eligible": False, "revision": None, "reason": reason}
+            if deletion.state == UNKNOWN_FAIL_CLOSED:
+                return {"eligible": False, "revision": None, "reason": deletion.reason or "DELETION_LEDGER_UNAVAILABLE"}
             manifest = parse_source((path / "source.md").read_text())
             validate_source(manifest, expected_object_id=source_id)
             payload = (path / "payload" / "original").read_bytes()
