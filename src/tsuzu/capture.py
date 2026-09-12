@@ -211,7 +211,9 @@ class CaptureService:
         sensitivity = _effective_sensitivity(request.sensitivity_override)
         if sensitivity == "RESTRICTED":
             return CaptureResult(CaptureStatus.REJECTED_RESTRICTED, reason="restricted sensitivity is not queueable")
-        fingerprint = _fingerprint(kind, scan.payload_sha256, len(raw), sensitivity, original_name)
+        scope = _scope(request.user_metadata)
+        origin_locator = {"type": "URL", "value": raw.decode("utf-8")} if kind == "URL" else {"type": "NONE", "value": None}
+        fingerprint = _fingerprint(kind, scan.payload_sha256, len(raw), sensitivity, original_name, scope, origin_locator)
         key_hash = hashlib.sha256(request.idempotency_key.encode()).hexdigest()
         if request.requested_at is not None:
             _validate_timestamp(request.requested_at)
@@ -227,8 +229,8 @@ class CaptureService:
             "capture_method": f"LOCAL_{kind}",
             "media_type": "text/plain" if kind == "TEXT" else "text/uri-list" if kind == "URL" else "application/octet-stream",
             "original_name": original_name,
-            "origin_locator": {"type": "URL", "value": raw.decode("utf-8")} if kind == "URL" else {"type": "NONE", "value": None},
-            "scope": _scope(request.user_metadata),
+            "origin_locator": origin_locator,
+            "scope": scope,
             "effective_sensitivity": sensitivity,
             "captured_at": requested_at,
         }
@@ -248,6 +250,19 @@ class CaptureService:
         return self._publish(job, raw)
 
     def _find_idempotency(self, key_hash: str, fingerprint: str) -> CaptureResult | None:
+        receipts = self.root / "receipts"
+        if receipts.exists() and not receipts.is_symlink():
+            receipt = receipts / f"{key_hash}.json"
+            if receipt.exists() and not receipt.is_symlink():
+                try:
+                    record = json.loads(receipt.read_text())
+                    if record.get("request_fingerprint") != fingerprint:
+                        return CaptureResult(CaptureStatus.IDEMPOTENCY_CONFLICT, reason="idempotency key fingerprint differs")
+                    if record.get("terminal_state") == "BLOCKED_RESTRICTED":
+                        return CaptureResult(CaptureStatus.REJECTED_RESTRICTED, reason="secret guard receipt exists")
+                    return CaptureResult(CaptureStatus.ALREADY_ACCEPTED, record.get("job_id"), record.get("source_id"))
+                except (OSError, json.JSONDecodeError):
+                    return CaptureResult(CaptureStatus.IO_FAILED, reason="capture receipt is unreadable")
         pending = self.root / "pending"
         if not pending.exists():
             return None
@@ -344,11 +359,13 @@ def _scope(metadata: dict[str, object] | None) -> dict[str, object]:
     value = metadata["scope"]
     if not isinstance(value, dict) or set(value) != {"scope_type", "scope_id"}:
         raise ValueError("invalid scope")
+    if value["scope_type"] != "GLOBAL" or value["scope_id"] is not None:
+        raise ValueError("A1 MVP scope is GLOBAL")
     return value
 
 
-def _fingerprint(kind: str, digest: str, size: int, sensitivity: str, original_name: str | None) -> str:
-    value = {"kind": kind, "sha256": digest, "bytes": size, "sensitivity": sensitivity, "original_name": original_name}
+def _fingerprint(kind: str, digest: str, size: int, sensitivity: str, original_name: str | None, scope: dict[str, object], origin_locator: dict[str, object]) -> str:
+    value = {"kind": kind, "capture_method": f"LOCAL_{kind}", "sha256": digest, "bytes": size, "sensitivity": sensitivity, "original_name": original_name, "scope": scope, "origin_locator": origin_locator}
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
