@@ -150,6 +150,13 @@ class AcquisitionTests(unittest.TestCase):
         self.assertEqual(result.status, "POLICY_BLOCKED")
         self.assertEqual(called, [])
 
+    def test_public_fetcher_rejects_credentialed_http_before_transport(self):
+        called = []
+        fetcher = PublicWebFetcher(lambda request, address: called.append(address), resolver=lambda host: ["8.8.8.8"])
+        result = fetcher.fetch(FetchRequest("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "11111111-1111-4111-8111-111111111111", "http://public.test/", credential_ref="keychain:item"))
+        self.assertEqual(result.status, "POLICY_BLOCKED")
+        self.assertEqual(called, [])
+
 
 if __name__ == "__main__":
     unittest.main()

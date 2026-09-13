@@ -30,6 +30,7 @@ class FetchRequest:
     timeout_budget_ms: int = 15_000
     max_response_bytes: int = 5 * 1024 * 1024
     max_redirects: int = 5
+    credential_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,8 @@ class PublicWebFetcher:
         self.resolver = resolver or _resolve_host
 
     def fetch(self, request: FetchRequest) -> FetchResult:
+        if request.credential_ref is not None and urlparse(request.url).scheme != "https":
+            return FetchResult("POLICY_BLOCKED", failure_code="CREDENTIAL_REQUIRES_HTTPS")
         address = _public_address(request.url, self.resolver)
         if address is None:
             return FetchResult("POLICY_BLOCKED", failure_code="UNSAFE_DESTINATION")
