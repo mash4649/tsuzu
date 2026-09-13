@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import hashlib
+import gzip
+import http.client
 import ipaddress
+import io
 import json
 import os
 import socket
+import ssl
+import time
 import uuid
-from dataclasses import dataclass
+import zlib
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from .canonical import CanonicalStore, CreateCanonicalIntent, ObjectRegistration, ObjectRegistry
 from .capture import SecretScanner
@@ -29,7 +35,10 @@ class FetchRequest:
     url: str
     timeout_budget_ms: int = 15_000
     max_response_bytes: int = 5 * 1024 * 1024
+    max_raw_response_bytes: int | None = None
+    max_header_bytes: int = 64 * 1024
     max_redirects: int = 5
+    connect_timeout_ms: int = 5_000
     credential_ref: str | None = None
 
 
@@ -62,29 +71,141 @@ class AcquisitionResult:
 
 
 class PublicWebFetcher:
-    """Adapter guard: transport receives one pinned public hop and never follows redirects."""
+    """Fetch public URLs one pinned hop at a time, rechecking every redirect."""
 
     adapter_id = "public_web"
     adapter_version = "1.0"
 
-    def __init__(self, transport, *, resolver: Callable[[str], list[str]] | None = None):
-        self.transport = transport
+    def __init__(self, transport=None, *, resolver: Callable[[str], list[str]] | None = None):
+        self.transport = transport or _http_transport
         self.resolver = resolver or _resolve_host
 
     def fetch(self, request: FetchRequest) -> FetchResult:
         if request.credential_ref is not None and urlparse(request.url).scheme != "https":
             return FetchResult("POLICY_BLOCKED", failure_code="CREDENTIAL_REQUIRES_HTTPS")
-        address = _public_address(request.url, self.resolver)
-        if address is None:
-            return FetchResult("POLICY_BLOCKED", failure_code="UNSAFE_DESTINATION")
-        result = self.transport(request, address)
-        if not isinstance(result, FetchResult):
-            return FetchResult("PERMANENT_FAILURE", failure_code="MALFORMED_TRANSPORT_RESULT")
-        if result.redirect_chain:
-            return FetchResult("PERMANENT_FAILURE", failure_code="TRANSPORT_FOLLOWED_REDIRECT")
-        if result.status == "REDIRECT" and _public_address(result.final_url or "", self.resolver) is None:
-            return FetchResult("POLICY_BLOCKED", failure_code="UNSAFE_REDIRECT_DESTINATION")
-        return result
+        deadline = time.monotonic() + request.timeout_budget_ms / 1000
+        current_url = request.url
+        redirect_chain: list[str] = []
+        while True:
+            remaining_ms = int((deadline - time.monotonic()) * 1000)
+            if remaining_ms <= 0:
+                return FetchResult("TRANSIENT_FAILURE", failure_code="TOTAL_TIMEOUT")
+            address = _public_address(current_url, self.resolver)
+            if address is None:
+                return FetchResult("POLICY_BLOCKED", failure_code="UNSAFE_DESTINATION" if not redirect_chain else "UNSAFE_REDIRECT_DESTINATION")
+            result = self.transport(replace(request, url=current_url, timeout_budget_ms=remaining_ms), address)
+            if not isinstance(result, FetchResult):
+                return FetchResult("PERMANENT_FAILURE", failure_code="MALFORMED_TRANSPORT_RESULT")
+            if result.redirect_chain:
+                return FetchResult("PERMANENT_FAILURE", failure_code="TRANSPORT_FOLLOWED_REDIRECT")
+            if time.monotonic() >= deadline:
+                return FetchResult("TRANSIENT_FAILURE", failure_code="TOTAL_TIMEOUT")
+            if result.status != "REDIRECT":
+                if result.status == "SUCCESS" and urljoin(current_url, result.final_url or "") != current_url:
+                    return FetchResult("PERMANENT_FAILURE", failure_code="TRANSPORT_CHANGED_DESTINATION")
+                return replace(result, final_url=current_url, redirect_chain=tuple(redirect_chain))
+            if len(redirect_chain) >= request.max_redirects:
+                return FetchResult("PERMANENT_FAILURE", failure_code="REDIRECT_LIMIT")
+            if not result.final_url:
+                return FetchResult("PERMANENT_FAILURE", failure_code="MALFORMED_REDIRECT")
+            target = urljoin(current_url, result.final_url)
+            redirect_chain.append(current_url)
+            current_url = target
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, host: str, port: int, *, address: str, timeout: float):
+        super().__init__(host, port=port, timeout=timeout)
+        self._address = address
+
+    def connect(self) -> None:
+        self.sock = self._create_connection((self._address, self.port), self.timeout, self.source_address)
+        if self._tunnel_host:
+            self._tunnel()
+
+
+class _PinnedHTTPSConnection(_PinnedHTTPConnection):
+    def __init__(self, host: str, port: int, *, address: str, timeout: float):
+        super().__init__(host, port, address=address, timeout=timeout)
+        self._context = ssl.create_default_context()
+
+    def connect(self) -> None:
+        super().connect()
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+def _http_transport(request: FetchRequest, address: str) -> FetchResult:
+    """Execute exactly one HTTP(S) hop against the resolver-approved address."""
+    started = time.monotonic()
+    raw_limit = request.max_raw_response_bytes if request.max_raw_response_bytes is not None else request.max_response_bytes
+    if min(request.timeout_budget_ms, request.connect_timeout_ms, request.max_response_bytes, raw_limit, request.max_header_bytes) <= 0:
+        return FetchResult("PERMANENT_FAILURE", failure_code="INVALID_FETCH_LIMIT")
+    try:
+        parsed = urlparse(request.url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return FetchResult("PERMANENT_FAILURE", failure_code="MALFORMED_URL")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        timeout = min(request.connect_timeout_ms, request.timeout_budget_ms) / 1000
+        connection = (_PinnedHTTPSConnection if parsed.scheme == "https" else _PinnedHTTPConnection)(parsed.hostname, port, address=address, timeout=timeout)
+        target = parsed.path or "/"
+        if parsed.query:
+            target = f"{target}?{parsed.query}"
+        connection.request("GET", target, headers={"Host": parsed.netloc, "Accept-Encoding": "gzip, deflate", "Connection": "close"})
+        response = connection.getresponse()
+        _set_remaining_timeout(connection, started, request.timeout_budget_ms)
+        if len(response.headers.as_bytes()) > request.max_header_bytes:
+            return FetchResult("PERMANENT_FAILURE", failure_code="RESPONSE_HEADERS_TOO_LARGE")
+        if 300 <= response.status < 400:
+            location = response.getheader("Location")
+            return FetchResult("REDIRECT", final_url=urljoin(request.url, location) if location else None, http_status=response.status, failure_code=None if location else "MALFORMED_REDIRECT")
+        if not 200 <= response.status < 300:
+            return FetchResult("TRANSIENT_FAILURE" if response.status in {408, 429} or response.status >= 500 else "PERMANENT_FAILURE", http_status=response.status, failure_code=f"HTTP_{response.status}")
+        content_length = response.getheader("Content-Length")
+        if content_length is not None and int(content_length) > raw_limit:
+            return FetchResult("PERMANENT_FAILURE", failure_code="RESPONSE_RAW_TOO_LARGE")
+        raw = response.read(raw_limit + 1)
+        if len(raw) > raw_limit:
+            return FetchResult("PERMANENT_FAILURE", failure_code="RESPONSE_RAW_TOO_LARGE")
+        body = _decompress_limited(raw, response.getheader("Content-Encoding"), request.max_response_bytes)
+        if body is None:
+            return FetchResult("PERMANENT_FAILURE", failure_code="RESPONSE_DECOMPRESSED_TOO_LARGE")
+        if time.monotonic() - started >= request.timeout_budget_ms / 1000:
+            return FetchResult("TRANSIENT_FAILURE", failure_code="TOTAL_TIMEOUT")
+        media_type = response.get_content_type().lower()
+        return FetchResult.success(final_url=request.url, body=body, media_type=media_type, http_status=response.status)
+    except (OSError, ValueError, http.client.HTTPException, zlib.error):
+        if time.monotonic() - started >= request.timeout_budget_ms / 1000:
+            return FetchResult("TRANSIENT_FAILURE", failure_code="TOTAL_TIMEOUT")
+        return FetchResult("TRANSIENT_FAILURE", failure_code="TRANSPORT_FAILURE")
+    finally:
+        if "connection" in locals():
+            connection.close()
+
+
+def _set_remaining_timeout(connection: http.client.HTTPConnection, started: float, total_ms: int) -> None:
+    remaining = total_ms / 1000 - (time.monotonic() - started)
+    if remaining <= 0:
+        raise TimeoutError
+    if connection.sock is not None:
+        connection.sock.settimeout(remaining)
+
+
+def _decompress_limited(raw: bytes, content_encoding: str | None, limit: int) -> bytes | None:
+    encoding = (content_encoding or "identity").lower().strip()
+    if encoding in {"", "identity"}:
+        return raw if len(raw) <= limit else None
+    if encoding == "gzip":
+        with gzip.GzipFile(fileobj=io.BytesIO(raw)) as stream:
+            body = stream.read(limit + 1)
+    elif encoding == "deflate":
+        decoder = zlib.decompressobj()
+        body = decoder.decompress(raw, limit + 1)
+        if decoder.unconsumed_tail:
+            return None
+        body += decoder.flush(limit + 1 - len(body))
+    else:
+        return None
+    return body if len(body) <= limit else None
 
 
 class AcquisitionService:

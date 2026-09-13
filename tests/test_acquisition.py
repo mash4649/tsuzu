@@ -1,8 +1,13 @@
+import gzip
+import http.server
 import tempfile
+import threading
+import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 
-from tsuzu.acquisition import AcquisitionService, FetchRequest, FetchResult, PublicWebFetcher
+from tsuzu.acquisition import AcquisitionService, FetchRequest, FetchResult, PublicWebFetcher, _http_transport
 from tsuzu.capture import CaptureRequest, CaptureService
 from tsuzu.deletion import DeletionRequest, DeletionResolver
 from tsuzu.vault import ActiveVaultLocator
@@ -22,6 +27,43 @@ class StaticAdapter:
         if self.before_return:
             self.before_return()
         return self.result
+
+
+@contextmanager
+def local_http_server():
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/redirect":
+                self.send_response(302)
+                self.send_header("Location", "/final")
+                self.end_headers()
+                return
+            if self.path == "/gzip":
+                body = gzip.compress(b"x" * 64)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Encoding", "gzip")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("X-Long", "x" * 64)
+            self.end_headers()
+            self.wfile.write(b"x" * 64)
+
+        def log_message(self, *_):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_port
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
 
 
 class AcquisitionTests(unittest.TestCase):
@@ -163,6 +205,54 @@ class AcquisitionTests(unittest.TestCase):
         result = fetcher.fetch(FetchRequest("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "11111111-1111-4111-8111-111111111111", "https://public.test/"))
         self.assertEqual(result.status, "POLICY_BLOCKED")
         self.assertEqual(called, ["https://public.test/"])
+
+    def test_public_fetcher_follows_only_revalidated_public_redirect_hops(self):
+        called = []
+
+        def transport(request, _address):
+            called.append(request.url)
+            if request.url.endswith("/start"):
+                return FetchResult("REDIRECT", final_url="https://public.test/final")
+            return FetchResult.success(final_url=request.url, body=b"ok", media_type="text/plain")
+
+        fetcher = PublicWebFetcher(transport, resolver=lambda host: ["8.8.8.8"])
+        result = fetcher.fetch(FetchRequest("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "11111111-1111-4111-8111-111111111111", "https://public.test/start"))
+
+        self.assertEqual(result.status, "SUCCESS")
+        self.assertEqual(result.final_url, "https://public.test/final")
+        self.assertEqual(result.redirect_chain, ("https://public.test/start",))
+        self.assertEqual(called, ["https://public.test/start", "https://public.test/final"])
+
+    def test_public_fetcher_enforces_redirect_and_total_timeout_bounds(self):
+        redirect = PublicWebFetcher(lambda request, address: FetchResult("REDIRECT", final_url="https://public.test/again"), resolver=lambda host: ["8.8.8.8"])
+        too_many = redirect.fetch(FetchRequest("dddddddd-dddd-4ddd-8ddd-dddddddddddd", "11111111-1111-4111-8111-111111111111", "https://public.test/start", max_redirects=1))
+        self.assertEqual(too_many.failure_code, "REDIRECT_LIMIT")
+
+        malformed = PublicWebFetcher(lambda request, address: FetchResult("REDIRECT"), resolver=lambda host: ["8.8.8.8"]).fetch(FetchRequest("aaaaaaaa-eeee-4aaa-8aaa-aaaaaaaaaaaa", "11111111-1111-4111-8111-111111111111", "https://public.test/"))
+        self.assertEqual(malformed.failure_code, "MALFORMED_REDIRECT")
+
+        def slow_transport(request, address):
+            time.sleep(0.03)
+            return FetchResult.success(final_url=request.url, body=b"ok", media_type="text/plain")
+
+        timed = PublicWebFetcher(slow_transport, resolver=lambda host: ["8.8.8.8"]).fetch(FetchRequest("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", "11111111-1111-4111-8111-111111111111", "https://public.test/", timeout_budget_ms=1))
+        self.assertEqual(timed.failure_code, "TOTAL_TIMEOUT")
+
+    def test_http_transport_does_not_follow_redirects_and_bounds_response_parts(self):
+        with local_http_server() as port:
+            request = FetchRequest("ffffffff-ffff-4fff-8fff-ffffffffffff", "11111111-1111-4111-8111-111111111111", f"http://public.test:{port}/redirect")
+            redirected = _http_transport(request, "127.0.0.1")
+            self.assertEqual(redirected.status, "REDIRECT")
+            self.assertEqual(redirected.final_url, f"http://public.test:{port}/final")
+
+            raw = _http_transport(FetchRequest("11111111-aaaa-4111-8111-111111111111", "11111111-1111-4111-8111-111111111111", f"http://public.test:{port}/final", max_response_bytes=8), "127.0.0.1")
+            self.assertEqual(raw.failure_code, "RESPONSE_RAW_TOO_LARGE")
+
+            expanded = _http_transport(FetchRequest("22222222-aaaa-4222-8222-222222222222", "11111111-1111-4111-8111-111111111111", f"http://public.test:{port}/gzip", max_response_bytes=8, max_raw_response_bytes=1024), "127.0.0.1")
+            self.assertEqual(expanded.failure_code, "RESPONSE_DECOMPRESSED_TOO_LARGE")
+
+            headers = _http_transport(FetchRequest("33333333-aaaa-4333-8333-333333333333", "11111111-1111-4111-8111-111111111111", f"http://public.test:{port}/final", max_header_bytes=32), "127.0.0.1")
+            self.assertEqual(headers.failure_code, "RESPONSE_HEADERS_TOO_LARGE")
 
 
 if __name__ == "__main__":
