@@ -82,6 +82,8 @@ class PublicWebFetcher:
             return FetchResult("PERMANENT_FAILURE", failure_code="MALFORMED_TRANSPORT_RESULT")
         if result.redirect_chain:
             return FetchResult("PERMANENT_FAILURE", failure_code="TRANSPORT_FOLLOWED_REDIRECT")
+        if result.status == "REDIRECT" and _public_address(result.final_url or "", self.resolver) is None:
+            return FetchResult("POLICY_BLOCKED", failure_code="UNSAFE_REDIRECT_DESTINATION")
         return result
 
 

@@ -157,6 +157,13 @@ class AcquisitionTests(unittest.TestCase):
         self.assertEqual(result.status, "POLICY_BLOCKED")
         self.assertEqual(called, [])
 
+    def test_public_fetcher_revalidates_each_redirect_before_next_hop(self):
+        called = []
+        fetcher = PublicWebFetcher(lambda request, address: called.append(request.url) or FetchResult("REDIRECT", final_url="https://private.test/"), resolver=lambda host: {"public.test": ["8.8.8.8"], "private.test": ["127.0.0.1"]}[host])
+        result = fetcher.fetch(FetchRequest("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "11111111-1111-4111-8111-111111111111", "https://public.test/"))
+        self.assertEqual(result.status, "POLICY_BLOCKED")
+        self.assertEqual(called, ["https://public.test/"])
+
 
 if __name__ == "__main__":
     unittest.main()
