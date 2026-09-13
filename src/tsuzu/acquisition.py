@@ -157,6 +157,25 @@ class AcquisitionService:
         })
         return AcquisitionResult("SCHEDULED", source_id, acquisition_key)
 
+    def run_scheduled_once(self, adapter, *, max_response_bytes: int = 5 * 1024 * 1024) -> AcquisitionResult:
+        root = self.locator.resolve_active_vault().root_ref / "system" / "acquisition-jobs"
+        if root.is_symlink() or not root.exists():
+            return AcquisitionResult("IDLE", "")
+        for path in sorted(root.glob("*.json")):
+            if path.is_symlink():
+                continue
+            try:
+                job = json.loads(path.read_text())
+                if job.get("state") not in {"PENDING", "RETRY_WAIT"}:
+                    continue
+                result = self.acquire(job["source_id"], adapter, max_response_bytes=max_response_bytes)
+            except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                continue
+            state = "ACQUIRED" if result.status in {"ACQUIRED", "ALREADY_ACQUIRED"} else result.status
+            _write_json_atomic(path, {**job, "state": state, "attempt_count": int(job.get("attempt_count", 0)) + 1, "next_attempt_at": None, "terminal_reason": result.status})
+            return result
+        return AcquisitionResult("IDLE", "")
+
     def _live_url_source(self, source_id: str):
         if DeletionResolver(self.locator).resolve_source(source_id).state != NOT_DELETED:
             return None

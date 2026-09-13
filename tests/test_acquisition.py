@@ -124,6 +124,16 @@ class AcquisitionTests(unittest.TestCase):
         self.assertIn('"state": "PENDING"', job)
         self.assertNotIn("https://public.test/page", job)
 
+    def test_scheduled_job_runs_to_one_body_free_terminal_effect(self):
+        source_id = self.capture_url("77777777-7777-4777-8777-777777777777")
+        scheduled = self.service.schedule(source_id)
+        result = self.service.run_scheduled_once(StaticAdapter(self.success()))
+
+        self.assertEqual(result.status, "ACQUIRED")
+        job = (self.locator.resolve_active_vault().root_ref / "system" / "acquisition-jobs" / f"{scheduled.acquisition_key}.json").read_text()
+        self.assertIn('"state": "ACQUIRED"', job)
+        self.assertNotIn("remote body", job)
+
 
 if __name__ == "__main__":
     unittest.main()
