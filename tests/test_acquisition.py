@@ -134,6 +134,15 @@ class AcquisitionTests(unittest.TestCase):
         self.assertIn('"state": "ACQUIRED"', job)
         self.assertNotIn("remote body", job)
 
+    def test_transient_job_stops_after_the_configured_attempt_bound(self):
+        source_id = self.capture_url("88888888-8888-4888-8888-888888888888")
+        scheduled = self.service.schedule(source_id)
+        transient = StaticAdapter(FetchResult("TRANSIENT_FAILURE", failure_code="TIMEOUT"))
+        self.assertEqual(self.service.run_scheduled_once(transient, max_attempts=2).status, "RETRY_WAIT")
+        self.assertEqual(self.service.run_scheduled_once(transient, max_attempts=2).status, "PERMANENT_FAILURE")
+        job = (self.locator.resolve_active_vault().root_ref / "system" / "acquisition-jobs" / f"{scheduled.acquisition_key}.json").read_text()
+        self.assertIn('"state": "PERMANENT_FAILURE"', job)
+
 
 if __name__ == "__main__":
     unittest.main()

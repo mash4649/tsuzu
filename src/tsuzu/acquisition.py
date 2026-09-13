@@ -157,7 +157,7 @@ class AcquisitionService:
         })
         return AcquisitionResult("SCHEDULED", source_id, acquisition_key)
 
-    def run_scheduled_once(self, adapter, *, max_response_bytes: int = 5 * 1024 * 1024) -> AcquisitionResult:
+    def run_scheduled_once(self, adapter, *, max_response_bytes: int = 5 * 1024 * 1024, max_attempts: int = 5) -> AcquisitionResult:
         root = self.locator.resolve_active_vault().root_ref / "system" / "acquisition-jobs"
         if root.is_symlink() or not root.exists():
             return AcquisitionResult("IDLE", "")
@@ -171,8 +171,11 @@ class AcquisitionService:
                 result = self.acquire(job["source_id"], adapter, max_response_bytes=max_response_bytes)
             except (OSError, ValueError, KeyError, json.JSONDecodeError):
                 continue
+            attempts = int(job.get("attempt_count", 0)) + 1
+            if result.status == "RETRY_WAIT" and attempts >= max_attempts:
+                result = AcquisitionResult("PERMANENT_FAILURE", result.source_id, result.acquisition_key, reason="retry limit reached")
             state = "ACQUIRED" if result.status in {"ACQUIRED", "ALREADY_ACQUIRED"} else result.status
-            _write_json_atomic(path, {**job, "state": state, "attempt_count": int(job.get("attempt_count", 0)) + 1, "next_attempt_at": None, "terminal_reason": result.status})
+            _write_json_atomic(path, {**job, "state": state, "attempt_count": attempts, "next_attempt_at": None, "terminal_reason": result.status})
             return result
         return AcquisitionResult("IDLE", "")
 
