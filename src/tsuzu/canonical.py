@@ -348,7 +348,7 @@ def _validate_envelope(manifest: dict[str, object]) -> None:
         raise SourceValidationError("invalid scope")
     if manifest["provenance"]["origin"] not in {"USER_EXPLICIT", "IMPORTED", "EXTERNAL_SOURCE", "SYSTEM_OBSERVED"}:
         raise SourceValidationError("invalid provenance")
-    if not isinstance(manifest["provenance"]["source_refs"], list) or not isinstance(manifest["provenance"]["actor"], str) or not manifest["provenance"]["actor"] or manifest["provenance"]["explicitness"] not in {"EXPLICIT", "IMPORTED"}:
+    if not isinstance(manifest["provenance"]["source_refs"], list) or not isinstance(manifest["provenance"]["actor"], str) or not manifest["provenance"]["actor"] or manifest["provenance"]["explicitness"] not in {"EXPLICIT", "IMPORTED", "OBSERVED"}:
         raise SourceValidationError("invalid provenance")
     if manifest["trust"]["level"] not in {"UNTRUSTED", "INFERRED", "ASSERTED", "OBSERVED"} or isinstance(manifest["trust"]["confidence"], bool) or not isinstance(manifest["trust"]["confidence"], (int, float)) or not 0 <= manifest["trust"]["confidence"] <= 1:
         raise SourceValidationError("invalid trust")

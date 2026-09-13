@@ -150,6 +150,13 @@ class SingleWriterWorker:
                     self._write_receipt(job, "COMMITTED", result.revision)
                 except OSError as exc:
                     return WorkerResult(WorkerStatus.COMMIT_UNCERTAIN, job_id, job["source_id"], str(exc))
+                if plan["kind"] == "URL":
+                    try:
+                        from .acquisition import AcquisitionService
+
+                        AcquisitionService(self.locator).schedule(job["source_id"])
+                    except Exception:
+                        pass  # URL acquisition scheduling must not change durable Capture success.
                 try:
                     self._failure("after_receipt")
                 except OSError as exc:
