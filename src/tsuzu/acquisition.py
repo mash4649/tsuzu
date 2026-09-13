@@ -60,6 +60,24 @@ class AcquisitionResult:
     reason: str = ""
 
 
+class PublicWebFetcher:
+    """Adapter guard: resolve and pin a public destination before transport."""
+
+    adapter_id = "public_web"
+    adapter_version = "1.0"
+
+    def __init__(self, transport, *, resolver: Callable[[str], list[str]] | None = None):
+        self.transport = transport
+        self.resolver = resolver or _resolve_host
+
+    def fetch(self, request: FetchRequest) -> FetchResult:
+        address = _public_address(request.url, self.resolver)
+        if address is None:
+            return FetchResult("POLICY_BLOCKED", failure_code="UNSAFE_DESTINATION")
+        result = self.transport(request, address)
+        return result if isinstance(result, FetchResult) else FetchResult("PERMANENT_FAILURE", failure_code="MALFORMED_TRANSPORT_RESULT")
+
+
 class AcquisitionService:
     """Materialize one immutable, body-checked remote representation per URL Source."""
 
@@ -195,14 +213,7 @@ class AcquisitionService:
             return None
 
     def _public_url(self, raw: str) -> bool:
-        parsed = urlparse(raw)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
-            return False
-        try:
-            addresses = [parsed.hostname] if _is_ip(parsed.hostname) else self.resolver(parsed.hostname)
-            return bool(addresses) and all(ipaddress.ip_address(address).is_global for address in addresses)
-        except (OSError, ValueError):
-            return False
+        return _public_address(raw, self.resolver) is not None
 
     def _record(self, result: AcquisitionResult) -> AcquisitionResult:
         root = self.locator.resolve_active_vault().root_ref / "system" / "acquisition-receipts"
@@ -218,6 +229,17 @@ class AcquisitionService:
 
 def _resolve_host(host: str) -> list[str]:
     return sorted({item[4][0] for item in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)})
+
+
+def _public_address(raw: str, resolver: Callable[[str], list[str]]) -> str | None:
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        return None
+    try:
+        addresses = [parsed.hostname] if _is_ip(parsed.hostname) else resolver(parsed.hostname)
+        return addresses[0] if addresses and all(ipaddress.ip_address(address).is_global for address in addresses) else None
+    except (OSError, ValueError):
+        return None
 
 
 def _acquisition_key(source_id: str, manifest: dict[str, object]) -> str:

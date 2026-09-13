@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tsuzu.acquisition import AcquisitionService, FetchResult
+from tsuzu.acquisition import AcquisitionService, FetchRequest, FetchResult, PublicWebFetcher
 from tsuzu.capture import CaptureRequest, CaptureService
 from tsuzu.deletion import DeletionRequest, DeletionResolver
 from tsuzu.vault import ActiveVaultLocator
@@ -142,6 +142,13 @@ class AcquisitionTests(unittest.TestCase):
         self.assertEqual(self.service.run_scheduled_once(transient, max_attempts=2).status, "PERMANENT_FAILURE")
         job = (self.locator.resolve_active_vault().root_ref / "system" / "acquisition-jobs" / f"{scheduled.acquisition_key}.json").read_text()
         self.assertIn('"state": "PERMANENT_FAILURE"', job)
+
+    def test_public_fetcher_blocks_unsafe_url_before_transport(self):
+        called = []
+        fetcher = PublicWebFetcher(lambda request, address: called.append((request.url, address)), resolver=lambda host: ["127.0.0.1"])
+        result = fetcher.fetch(FetchRequest("99999999-9999-4999-8999-999999999999", "11111111-1111-4111-8111-111111111111", "https://private.test/"))
+        self.assertEqual(result.status, "POLICY_BLOCKED")
+        self.assertEqual(called, [])
 
 
 if __name__ == "__main__":
