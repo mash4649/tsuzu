@@ -62,7 +62,7 @@ class AcquisitionResult:
 
 
 class PublicWebFetcher:
-    """Adapter guard: resolve and pin a public destination before transport."""
+    """Adapter guard: transport receives one pinned public hop and never follows redirects."""
 
     adapter_id = "public_web"
     adapter_version = "1.0"
@@ -78,7 +78,11 @@ class PublicWebFetcher:
         if address is None:
             return FetchResult("POLICY_BLOCKED", failure_code="UNSAFE_DESTINATION")
         result = self.transport(request, address)
-        return result if isinstance(result, FetchResult) else FetchResult("PERMANENT_FAILURE", failure_code="MALFORMED_TRANSPORT_RESULT")
+        if not isinstance(result, FetchResult):
+            return FetchResult("PERMANENT_FAILURE", failure_code="MALFORMED_TRANSPORT_RESULT")
+        if result.redirect_chain:
+            return FetchResult("PERMANENT_FAILURE", failure_code="TRANSPORT_FOLLOWED_REDIRECT")
+        return result
 
 
 class AcquisitionService:
