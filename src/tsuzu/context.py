@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .deletion import DELETED, NOT_DELETED, DeletionResolver
 from .retrieval import ApprovedCandidate, RetrievalResult
+from .representation import RepresentationResolver
 from .source import SourceValidationError, parse_source, validate_payload, validate_source
 from .vault import ActiveVaultLocator
 
@@ -73,6 +74,7 @@ class ContextBundleBuilder:
         self.locator = locator
         self.root = Path(runtime_root) / "context-traces"
         self.deletion = deletion_resolver or DeletionResolver(locator)
+        self.representations = RepresentationResolver(locator, deletion_resolver=self.deletion)
         self.failure_injector = failure_injector
 
     def build(self, result: RetrievalResult) -> ContextResult:
@@ -119,22 +121,28 @@ class ContextBundleBuilder:
             manifest = parse_source((path / "source.md").read_text())
             validate_source(manifest, expected_object_id=candidate.source_id)
             payload = (path / "payload/original").read_bytes()
-            if not validate_payload(manifest, payload) or manifest["revision"] != candidate.source_revision or manifest["source"]["payload_sha256"] != candidate.payload_sha256:
+            if not validate_payload(manifest, payload) or manifest["revision"] != candidate.source_revision:
                 return None, "POLICY_REEVALUATION_REQUIRED"
         except (OSError, ValueError, SourceValidationError, KeyError):
             return None, "CANONICAL_INVALID"
         state = self.deletion.resolve_source(candidate.source_id)
         if state.state != NOT_DELETED:
             return None, "DELETED" if state.state == DELETED else "DELETION_UNKNOWN"
+        representation = self.representations.resolve(candidate.source_id)
+        if representation is None or (representation.object_type, representation.object_id, representation.content_sha256 or "") != (candidate.representation_object_type, candidate.representation_object_id, candidate.payload_sha256):
+            return None, "POLICY_REEVALUATION_REQUIRED"
         source = manifest["source"]
         if candidate.content_mode == "METADATA_ONLY":
             name = Path(source["original_name"] or "").name
             text, kind, before, after = f"{source['kind']}: {name} ({source['media_type']})", "METADATA_ONLY", False, False
         else:
-            text, kind, before, after = _excerpt(payload.decode("utf-8"), query)
+            projected = self.representations.project(representation)
+            if projected.status != "READY":
+                return None, "INDEX_RECONCILE_NEEDED"
+            text, kind, before, after = _excerpt(projected.text, query)
             if kind == "STALE":
                 return None, "INDEX_RECONCILE_NEEDED"
-        trace = {"trace_id": str(uuid.uuid4()), "source_kind": source["kind"], "capture_method": source["capture_method"], "captured_at": source["captured_at"], "original_name": source["original_name"], "origin_locator": source["origin_locator"] if source["kind"] == "URL" else {"type": "NONE", "value": None}}
+        trace = {"trace_id": str(uuid.uuid4()), "root_source_id": candidate.source_id, "representation": {"object_type": representation.object_type, "object_id": representation.object_id, "sha256": representation.content_sha256, "fidelity": representation.fidelity}, "text_projection": {"extractor_id": candidate.extractor_id, "extractor_version": candidate.extractor_version}, "source_kind": source["kind"], "capture_method": source["capture_method"], "captured_at": source["captured_at"], "original_name": source["original_name"], "origin_locator": source["origin_locator"] if source["kind"] == "URL" else {"type": "NONE", "value": None}}
         return ContextItem(ordinal, candidate.source_id, candidate.source_revision, "UNTRUSTED_DATA", text, kind, before, after, trace), ""
 
     def _write_trace(self, bundle: ContextBundle, candidates: tuple[ApprovedCandidate, ...]) -> None:
@@ -142,7 +150,7 @@ class ContextBundleBuilder:
             raise OSError("trace root is symlink")
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         path = self.root / f"{bundle.context_trace_id}.json"
-        record = {"context_trace_id": bundle.context_trace_id, "bundle_id": bundle.bundle_id, "request_id": bundle.request_id, "created_at": bundle.created_at, "host": {"destination_id": bundle.destination_id, "destination_class": bundle.destination_class}, "scope": {"scope_type": bundle.scope_type, "scope_id": bundle.scope_id}, "query_hash": bundle.query_hash, "source_refs": [{"source_id": item.source_id, "revision": item.source_revision, "payload_sha256": next(c.payload_sha256 for c in candidates if c.source_id == item.source_id), "policy_decision_id": next(c.policy_decision_id for c in candidates if c.source_id == item.source_id), "excerpt_kind": item.excerpt_kind, "excerpt_chars": len(item.text)} for item in bundle.items], "bundle_chars": bundle.used_chars, "item_count": len(bundle.items), "truncated": bundle.truncated}
+        record = {"context_trace_id": bundle.context_trace_id, "bundle_id": bundle.bundle_id, "request_id": bundle.request_id, "created_at": bundle.created_at, "host": {"destination_id": bundle.destination_id, "destination_class": bundle.destination_class}, "scope": {"scope_type": bundle.scope_type, "scope_id": bundle.scope_id}, "query_hash": bundle.query_hash, "source_refs": [{"source_id": item.source_id, "revision": item.source_revision, "payload_sha256": next(c.payload_sha256 for c in candidates if c.source_id == item.source_id), "representation": {"object_type": next(c.representation_object_type for c in candidates if c.source_id == item.source_id), "object_id": next(c.representation_object_id for c in candidates if c.source_id == item.source_id)}, "policy_decision_id": next(c.policy_decision_id for c in candidates if c.source_id == item.source_id), "excerpt_kind": item.excerpt_kind, "excerpt_chars": len(item.text)} for item in bundle.items], "bundle_chars": bundle.used_chars, "item_count": len(bundle.items), "truncated": bundle.truncated}
         self._failure("before_trace")
         staged = path.with_suffix(".staged")
         with staged.open("x", encoding="utf-8") as stream:

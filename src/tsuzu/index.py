@@ -15,14 +15,14 @@ from pathlib import Path
 
 from .capture import SecretScanner
 from .deletion import DELETED, NOT_DELETED, UNKNOWN_FAIL_CLOSED, DeletionResolver
+from .representation import RepresentationResolver
 from .source import SourceValidationError, parse_source, validate_payload, validate_source
 from .vault import ActiveVaultLocator
 
 
 APPLICATION_ID = 0x5453555A
-SCHEMA_GENERATION = 1
-PROJECTION_VERSION = "a5-1.0"
-TEXT_FILE_TYPES = {"application/json", "application/xml", "application/javascript"}
+SCHEMA_GENERATION = 2
+PROJECTION_VERSION = "c2-1.0"
 
 
 class IndexCapabilityError(RuntimeError):
@@ -69,6 +69,7 @@ class IndexManager:
         self.locator = locator
         self.scanner = scanner or SecretScanner()
         self.deletion = deletion_resolver or DeletionResolver(locator)
+        self.representations = RepresentationResolver(locator, deletion_resolver=self.deletion)
         self.max_text_file_bytes = max_text_file_bytes
         self.path = self.root / "tsuzu.sqlite"
         self.lock_path = self.root / "index.lock"
@@ -135,7 +136,7 @@ class IndexManager:
                 self._remove_rows(connection, source_id)
                 if projection["eligible"]:
                     connection.execute(
-                        "INSERT INTO source_index VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "INSERT INTO source_index VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         projection["row"],
                     )
                     connection.execute("INSERT INTO source_fts(source_id,name,body) VALUES(?,?,?)", (source_id, projection["name"], projection["body"]))
@@ -190,6 +191,13 @@ class IndexManager:
         else:
             rows = connection.execute("SELECT source_id FROM source_fts WHERE name LIKE ? OR body LIKE ?", (f"%{query}%", f"%{query}%")).fetchall()
         return [source_id for row in rows if (source_id := row[0]) and self.deletion.resolve_source(source_id).state == NOT_DELETED]
+
+    def indexed_representation(self, source_id: str) -> tuple[str, str, str | None] | None:
+        row = self._require_open().execute(
+            "SELECT representation_object_type, representation_object_id, representation_sha256 FROM source_index WHERE source_id=?",
+            (source_id,),
+        ).fetchone()
+        return tuple(row) if row else None
 
     def full_rebuild(self) -> None:
         self._require_open()
@@ -259,22 +267,15 @@ class IndexManager:
             scan = self.scanner.scan_bytes(payload)
             if scan.outcome != "CLEAR":
                 return {"eligible": False, "revision": manifest["revision"], "reason": "SECRET_RECLASSIFIED"}
-            name = source["original_name"] or ""
-            body = ""
-            mode = "METADATA_ONLY"
-            reason = None
-            if source["kind"] in {"TEXT", "URL"}:
-                body = payload.decode("utf-8")
-                mode = "BODY"
-            elif source["media_type"].startswith("text/") or source["media_type"] in TEXT_FILE_TYPES:
-                if len(payload) <= self.max_text_file_bytes:
-                    body = payload.decode("utf-8")
-                    mode = "BODY"
-                else:
-                    reason = "OVERSIZE_BODY"
-            else:
-                reason = "UNSUPPORTED_BODY_PROJECTION"
-            fingerprint = _fingerprint(manifest, mode)
+            representation = self.representations.resolve(source_id)
+            if representation is None:
+                return {"eligible": False, "revision": manifest["revision"], "reason": "REPRESENTATION_UNAVAILABLE"}
+            projected = self.representations.project(representation)
+            name = source["original_name"] or (payload.decode("utf-8") if source["kind"] == "URL" else "") or ""
+            body = projected.text
+            mode = "BODY" if projected.status == "READY" else "METADATA_ONLY"
+            reason = None if projected.status == "READY" else "UNSUPPORTED_BODY_PROJECTION" if projected.status == "METADATA_ONLY" else projected.status
+            fingerprint = _fingerprint(manifest, mode, representation, projected)
             row = (
                 source_id,
                 manifest["revision"],
@@ -295,6 +296,12 @@ class IndexManager:
                 hashlib.sha256(body.encode()).hexdigest() if body else None,
                 fingerprint,
                 _now(),
+                representation.object_type,
+                representation.object_id,
+                representation.content_sha256,
+                representation.fidelity,
+                projected.extractor_id,
+                projected.extractor_version,
             )
             return {"eligible": True, "revision": manifest["revision"], "row": row, "name": name, "body": body}
         except (OSError, ValueError, SourceValidationError, KeyError):
@@ -311,7 +318,7 @@ class IndexManager:
             projection = self._project(path.name)
             self._remove_rows(connection, path.name)
             if projection["eligible"]:
-                connection.execute("INSERT INTO source_index VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", projection["row"])
+                connection.execute("INSERT INTO source_index VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", projection["row"])
                 connection.execute("INSERT INTO source_fts(source_id,name,body) VALUES(?,?,?)", (path.name, projection["name"], projection["body"]))
             else:
                 connection.execute("INSERT INTO index_exclusion(source_id,source_revision,reason_code,observed_at) VALUES(?,?,?,?)", (path.name, projection.get("revision"), projection["reason"], _now()))
@@ -328,7 +335,10 @@ class IndexManager:
               sensitivity TEXT NOT NULL, deletion_state TEXT NOT NULL, captured_at TEXT NOT NULL,
               payload_sha256 TEXT NOT NULL, payload_bytes INTEGER NOT NULL, original_name TEXT,
               canonical_relpath TEXT NOT NULL, projection_mode TEXT NOT NULL, projection_reason TEXT,
-              index_text_sha256 TEXT, index_fingerprint TEXT NOT NULL, indexed_at TEXT NOT NULL
+              index_text_sha256 TEXT, index_fingerprint TEXT NOT NULL, indexed_at TEXT NOT NULL,
+              representation_object_type TEXT NOT NULL, representation_object_id TEXT NOT NULL,
+              representation_sha256 TEXT, representation_fidelity TEXT NOT NULL,
+              extractor_id TEXT, extractor_version TEXT
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS source_fts USING fts5(source_id UNINDEXED, name, body, tokenize='trigram');
             CREATE TABLE IF NOT EXISTS index_exclusion(source_id TEXT PRIMARY KEY, source_revision INTEGER, reason_code TEXT NOT NULL, observed_at TEXT NOT NULL);
@@ -369,7 +379,7 @@ class IndexManager:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-def _fingerprint(manifest: dict[str, object], projection_mode: str) -> str:
+def _fingerprint(manifest: dict[str, object], projection_mode: str, representation=None, projected=None) -> str:
     source = manifest["source"]
     value = {
         "object_id": manifest["object_id"],
@@ -383,6 +393,8 @@ def _fingerprint(manifest: dict[str, object], projection_mode: str) -> str:
         "deletion": manifest["deletion"],
         "projection_version": PROJECTION_VERSION,
         "projection_mode": projection_mode,
+        "representation": None if representation is None else (representation.object_type, representation.object_id, representation.content_sha256, representation.fidelity),
+        "extractor": None if projected is None else (projected.extractor_id, projected.extractor_version),
     }
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 

@@ -69,6 +69,11 @@ class ApprovedCandidate:
     source_id: str
     source_revision: int
     payload_sha256: str
+    representation_object_type: str
+    representation_object_id: str
+    representation_fidelity: str
+    extractor_id: str | None
+    extractor_version: str | None
     query_mode: str
     rank: float | None
     destination_id: str
@@ -200,23 +205,28 @@ class RetrievalService:
         source_scope = Scope(manifest["scope"]["scope_type"], manifest["scope"]["scope_id"])
         if not _scope_allows(scope, source_scope):
             return None, "DENY_SCOPE" if _valid_scope(source_scope) else "DENY_UNSUPPORTED_SCOPE"
-        sensitivity = manifest["sensitivity"]["level"]
+        representation = self.index.representations.resolve(source_id)
+        indexed = self.index.indexed_representation(source_id)
+        if representation is None or indexed != (representation.object_type, representation.object_id, representation.content_sha256):
+            return None, "DENY_STALE_REPRESENTATION"
+        sensitivity = representation.sensitivity
         if sensitivity == "RESTRICTED":
             return None, "DENY_RESTRICTED"
         if sensitivity not in {"PUBLIC", "PERSONAL", "SENSITIVE"}:
             return None, "DENY_SENSITIVITY_UNKNOWN"
         if sensitivity == "SENSITIVE" and destination.destination_class != DESTINATION_LOCAL:
             return None, "DENY_SENSITIVE_EXTERNAL"
-        if self.scanner.scan_bytes(payload).outcome != "CLEAR":
+        if representation.payload is not None and self.scanner.scan_bytes(representation.payload).outcome != "CLEAR":
             return None, "DENY_SECRET_RECLASSIFIED"
         source = manifest["source"]
-        if source["kind"] in {"TEXT", "URL"}:
-            content_mode, content = "TEXT_BODY", payload.decode("utf-8")
+        projected = self.index.representations.project(representation)
+        if projected.status == "READY":
+            content_mode, content = "TEXT_BODY", projected.text
         else:
             content_mode = "METADATA_ONLY"
             content = {"original_name": source["original_name"] or "", "kind": source["kind"], "media_type": source["media_type"]}
         decision_id = hashlib.sha256(f"{request.request_id}:{source_id}:{manifest['revision']}:{POLICY_VERSION}".encode()).hexdigest()
-        return ApprovedCandidate(request.request_id, source_id, manifest["revision"], source["payload_sha256"], query_mode, rank, destination.destination_id, destination.destination_class, sensitivity, scope, content_mode, content, policy_decision_id=decision_id), ""
+        return ApprovedCandidate(request.request_id, source_id, manifest["revision"], representation.content_sha256 or "", representation.object_type, representation.object_id, representation.fidelity, projected.extractor_id, projected.extractor_version, query_mode, rank, destination.destination_id, destination.destination_class, sensitivity, scope, content_mode, content, policy_decision_id=decision_id), ""
 
     def _result(self, status: str, approved: tuple[ApprovedCandidate, ...], decisions: tuple[tuple[str, str], ...], request: RetrievalRequest, destination: Destination | None) -> RetrievalResult:
         manifest = {"request_id": request.request_id, "policy_version": POLICY_VERSION, "destination_id": request.destination_id, "destination_class": destination.destination_class if destination else DESTINATION_UNKNOWN_EXTERNAL, "capability": request.capability, "evaluated_at": _now(), "approved_count": len(approved), "decision_hash": hashlib.sha256(repr(decisions).encode()).hexdigest()}
