@@ -1,7 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-capability",
-  "description": "The TSUZU main window can call only the command permitted by build.rs.",
+  "description": "The TSUZU main window can check runtime health and persist Canonical SOURCE only in its app-local directory.",
   "windows": ["main"],
-  "permissions": ["allow-runtime-health"]
+  "permissions": [
+    "allow-runtime-health",
+    "fs:default",
+    "fs:allow-app-read-recursive",
+    "fs:allow-app-write-recursive"
+  ]
 }
