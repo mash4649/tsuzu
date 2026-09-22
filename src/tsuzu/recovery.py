@@ -12,10 +12,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from .canonical import _parse_manifest
+from .canonical import ObjectRegistration, _parse_manifest, _validate_manifest
 from .deletion import _read_record, _validate_record
 from .index import IndexManager
-from .source import SourceValidationError, parse_source, validate_payload, validate_source
+from .source import SourceValidationError, validate_payload, validate_source
 from .vault import ActiveVaultLocator, LocatorError, VaultHandle
 from .writer import WriterError, maintenance_lock
 
@@ -27,6 +27,8 @@ EXTERNAL_SECRET = "EXTERNAL_SECRET"
 PROTECTION_REGISTRY_VERSION = "r5-1.0"
 _PROTECTED_TYPES = frozenset({"SOURCE", "SOURCE_VERSION"})
 _SCHEMA_VERSIONS = {"SOURCE": "1.0.0", "SOURCE_VERSION": "1.0.0"}
+_PROTECTED_SYSTEM = frozenset({"import-receipts", "history-coverage", "acquisition-receipts", "c1-receipts.jsonl"})
+_RUNTIME_SYSTEM = frozenset({"staging", "quarantine", "write.lock", "recovery-receipts.jsonl", "acquisition-jobs"})
 
 
 @dataclass(frozen=True)
@@ -73,7 +75,10 @@ class RecoveryCoordinator:
                 self._ensure_ledger_root(active.root_ref)
                 snapshot = self.backup_root / backup_id
                 if snapshot.exists() or snapshot.is_symlink():
-                    return BackupResult("BACKUP_ID_CONFLICT", backup_id, snapshot)
+                    marker = snapshot / "COMMITTED"
+                    if snapshot.is_symlink() or not snapshot.is_dir() or marker.exists():
+                        return BackupResult("BACKUP_ID_CONFLICT", backup_id, snapshot)
+                    shutil.rmtree(snapshot)
                 staging = self.backup_root / f".{backup_id}.staging"
                 if staging.exists() or staging.is_symlink():
                     return BackupResult("BACKUP_ID_CONFLICT", backup_id, staging)
@@ -122,15 +127,18 @@ class RecoveryCoordinator:
                 if (previous.vault_id, previous.generation) != (active.vault_id, active.generation):
                     return RestoreResult("STALE_GENERATION", backup_id)
                 candidate_path = Path(candidate_root)
+                candidate_absolute = candidate_path.resolve()
+                active_root = previous.root_ref.resolve()
+                if candidate_absolute == active_root or active_root in candidate_absolute.parents:
+                    return RestoreResult("CANDIDATE_INVALID", backup_id)
                 if candidate_path.exists() or candidate_path.is_symlink():
                     return RestoreResult("CANDIDATE_EXISTS", backup_id)
                 candidate_path.mkdir(parents=True, mode=0o700)
                 try:
                     protected = snapshot / "protected"
                     shutil.copytree(protected / "canonical", candidate_path / "canonical", symlinks=True)
-                    ledger = protected / "system" / "deletion-ledger"
-                    if ledger.exists():
-                        shutil.copytree(ledger, candidate_path / "system" / "deletion-ledger", symlinks=True)
+                    if (protected / "system").exists():
+                        shutil.copytree(protected / "system", candidate_path / "system", symlinks=True)
                     self._merge_current_ledger(previous.root_ref, candidate_path)
                     self._validate_vault(candidate_path)
                     self._migrate_n_minus_one(candidate_path)
@@ -164,7 +172,9 @@ class RecoveryCoordinator:
             raise RecoveryError("BACKUP_DESTINATION_INVALID")
         destination = self.backup_root.resolve()
         active = active_root.resolve()
-        if destination == active or active in destination.parents:
+        control = self.locator.state_dir.resolve()
+        index = self.index_root.resolve() if self.index_root is not None else None
+        if destination == active or active in destination.parents or destination == control or control in destination.parents or (index is not None and (destination == index or index in destination.parents)):
             raise RecoveryError("BACKUP_DESTINATION_RECURSIVE")
         probe = destination / f".r5-probe-{uuid.uuid4().hex}"
         _write_new(probe, "probe")
@@ -181,6 +191,8 @@ class RecoveryCoordinator:
         canonical = root / "canonical"
         if canonical.is_symlink() or not canonical.exists():
             raise RecoveryError("CANONICAL_INTEGRITY_FAILURE")
+        if any(item.name not in {"sources", "objects"} or item.is_symlink() or not item.is_dir() for item in canonical.iterdir()):
+            raise RecoveryError("BACKUP_CLASS_UNKNOWN")
         files: list[tuple[Path, Path, str]] = []
         privacy = {"PUBLIC": False, "PERSONAL": False, "SENSITIVE": False}
         source_root = canonical / "sources"
@@ -188,9 +200,11 @@ class RecoveryCoordinator:
             if source_root.is_symlink():
                 raise RecoveryError("CANONICAL_INTEGRITY_FAILURE")
             for item in sorted(source_root.iterdir()):
-                self._validate_source(item)
-                manifest = parse_source((item / "source.md").read_text())
-                privacy[manifest["sensitivity"]["level"]] = True
+                manifest = self._validate_source(item)
+                sensitivity = manifest["sensitivity"]["level"]
+                if sensitivity not in privacy:
+                    raise RecoveryError("EXTERNAL_SECRET")
+                privacy[sensitivity] = True
                 files.extend(_files_under(item, Path("canonical/sources") / item.name, "SOURCE"))
         objects = canonical / "objects"
         if objects.exists():
@@ -202,9 +216,30 @@ class RecoveryCoordinator:
                 for item in sorted(type_root.iterdir()):
                     self._validate_object(item, type_root.name)
                     manifest = _parse_manifest((item / "object.md").read_text())
-                    privacy[manifest["sensitivity"]["level"]] = True
+                    sensitivity = manifest["sensitivity"]["level"]
+                    if sensitivity not in privacy:
+                        raise RecoveryError("EXTERNAL_SECRET")
+                    privacy[sensitivity] = True
                     files.extend(_files_under(item, Path("canonical/objects") / type_root.name / item.name, type_root.name))
-        ledger = root / "system" / "deletion-ledger"
+        system = root / "system"
+        if system.is_symlink() or not system.is_dir():
+            raise RecoveryError("CANONICAL_INTEGRITY_FAILURE")
+        for item in system.iterdir():
+            if item.name == "deletion-ledger":
+                continue
+            if item.name in _RUNTIME_SYSTEM:
+                if item.is_symlink():
+                    raise RecoveryError("CANONICAL_INTEGRITY_FAILURE")
+                continue
+            if item.name not in _PROTECTED_SYSTEM or item.is_symlink():
+                raise RecoveryError("BACKUP_CLASS_UNKNOWN")
+            if item.is_dir():
+                files.extend(_files_under(item, Path("system") / item.name, "SYSTEM"))
+            elif item.is_file():
+                files.append((item, Path("system") / item.name, "SYSTEM"))
+            else:
+                raise RecoveryError("CANONICAL_INTEGRITY_FAILURE")
+        ledger = system / "deletion-ledger"
         self._validate_ledger(root, required=True)
         files.extend(_files_under(ledger, Path("system/deletion-ledger"), "DELETION_LEDGER"))
         return files, privacy
@@ -213,12 +248,20 @@ class RecoveryCoordinator:
         entries = [{"relative_path": str(relative), "protection_class": PROTECTED, "object_type": object_type, "byte_length": path.stat().st_size, "sha256": _sha256(protected / relative)} for path, relative, object_type in files]
         encoded_entries = json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()
         ledger_entries = [entry for entry in entries if entry["object_type"] == "DELETION_LEDGER"]
-        schema = [{"object_type": object_type, "schema_versions": [version], "count": sum(1 for _, _, kind in files if kind == object_type and _.name == "object.md")} for object_type, version in _SCHEMA_VERSIONS.items()]
+        schema = [
+            {
+                "object_type": object_type,
+                "schema_versions": [version],
+                "count": sum(1 for path, _, kind in files if kind == object_type and path.name == "object.md"),
+            }
+            for object_type, version in _SCHEMA_VERSIONS.items()
+        ]
         now = _now()
         return {"backup_id": backup_id, "backup_contract_version": "1.0.0", "created_at": now, "completed_at": now, "source": {"vault_instance_id": active.vault_id, "vault_locator_hash": active.capability_report_hash}, "protection_registry_version": PROTECTION_REGISTRY_VERSION, "schema_inventory": schema, "content_manifest": {"algorithm": "SHA-256", "entry_count": len(entries), "manifest_hash": hashlib.sha256(encoded_entries).hexdigest(), "entries": entries}, "privacy_summary": {"contains_public": privacy["PUBLIC"], "contains_personal": privacy["PERSONAL"], "contains_sensitive": privacy["SENSITIVE"], "contains_restricted_knowledge": False}, "deletion_ledger": {"record_count": len(ledger_entries), "ledger_manifest_hash": hashlib.sha256(json.dumps(ledger_entries, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}, "app_contract": {"canonical_contract_version": "1.0.0", "created_by_app_version": "p0"}}
 
     def _validate_snapshot(self, snapshot: Path, backup_id: str) -> None:
-        if snapshot.is_symlink() or not snapshot.is_dir() or not (snapshot / "COMMITTED").is_file():
+        marker = snapshot / "COMMITTED"
+        if snapshot.is_symlink() or not snapshot.is_dir() or marker.is_symlink() or not marker.is_file():
             raise RecoveryError("INCOMPLETE_BACKUP")
         manifest_path = snapshot / "backup.md"
         if manifest_path.is_symlink():
@@ -237,33 +280,66 @@ class RecoveryCoordinator:
             path = snapshot / "protected" / relative
             if path.is_symlink() or not path.is_file() or path.stat().st_size != entry.get("byte_length") or _sha256(path) != entry.get("sha256"):
                 raise RecoveryError("BACKUP_INTEGRITY_FAILED")
+        actual = set()
+        for path in (snapshot / "protected").rglob("*"):
+            if path.is_symlink():
+                raise RecoveryError("BACKUP_INTEGRITY_FAILED")
+            if path.is_file():
+                actual.add(str(path.relative_to(snapshot / "protected")))
+        if actual != {entry["relative_path"] for entry in entries}:
+            raise RecoveryError("BACKUP_INTEGRITY_FAILED")
 
     def _validate_vault(self, root: Path) -> None:
         self._enumerate_protected(root)
 
     @staticmethod
-    def _validate_source(path: Path) -> None:
+    def _validate_source(path: Path) -> dict[str, object]:
         if path.is_symlink() or not path.is_dir():
             raise RecoveryError("RESTORE_CANONICAL_INTEGRITY_FAILED")
         manifest_path, payload = path / "source.md", path / "payload" / "original"
         if any(item.is_symlink() or not item.is_file() for item in (manifest_path, payload)):
             raise RecoveryError("RESTORE_CANONICAL_INTEGRITY_FAILED")
-        manifest = parse_source(manifest_path.read_text())
-        validate_source(manifest, expected_object_id=path.name)
-        if not validate_payload(manifest, payload.read_bytes()):
+        manifest = _parse_document(manifest_path.read_text())
+        version = manifest.get("schema_version")
+        if version == "0.9.0":
+            compatible = dict(manifest)
+            compatible["schema_version"] = "1.0.0"
+        elif version == "1.0.0":
+            compatible = manifest
+        elif isinstance(version, str) and version > "1.0.0":
+            raise RecoveryError("RESTORE_REQUIRES_NEWER_APP")
+        else:
+            raise RecoveryError("UNSUPPORTED_OLD_SCHEMA")
+        validate_source(compatible, expected_object_id=path.name)
+        if not validate_payload(compatible, payload.read_bytes()):
             raise RecoveryError("RESTORE_CANONICAL_INTEGRITY_FAILED")
+        return manifest
 
     @staticmethod
     def _validate_object(path: Path, object_type: str) -> None:
         if path.is_symlink() or not path.is_dir() or (path / "object.md").is_symlink():
             raise RecoveryError("RESTORE_CANONICAL_INTEGRITY_FAILED")
         manifest = _parse_manifest((path / "object.md").read_text())
-        if manifest.get("object_type") != object_type or manifest.get("object_id") != path.name or manifest.get("schema_version") not in {"1.0.0", "0.9.0"}:
+        if manifest.get("object_type") != object_type or manifest.get("object_id") != path.name:
             raise RecoveryError("SCHEMA_UNKNOWN_FAIL_CLOSED")
+        version = manifest.get("schema_version")
+        if version not in {"1.0.0", "0.9.0"}:
+            if isinstance(version, str) and version > "1.0.0":
+                raise RecoveryError("RESTORE_REQUIRES_NEWER_APP")
+            raise RecoveryError("UNSUPPORTED_OLD_SCHEMA")
         payload = path / "payload" / "original"
-        details = manifest.get("payload")
-        if not isinstance(details, dict) or payload.is_symlink() or not payload.is_file() or _sha256(payload) != details.get("sha256") or payload.stat().st_size != details.get("bytes"):
+        if payload.is_symlink() or not payload.is_file():
             raise RecoveryError("RESTORE_CANONICAL_INTEGRITY_FAILED")
+        compatible = dict(manifest)
+        compatible["schema_version"] = "1.0.0"
+        try:
+            _validate_manifest(
+                compatible,
+                ObjectRegistration("SOURCE_VERSION", "CANONICAL", "IMMUTABLE", "PAYLOAD", "R1"),
+                payload.read_bytes(),
+            )
+        except SourceValidationError as exc:
+            raise RecoveryError("RESTORE_CANONICAL_INTEGRITY_FAILED") from exc
 
     def _validate_ledger(self, root: Path, *, required: bool) -> None:
         ledger = root / "system" / "deletion-ledger"
@@ -300,6 +376,12 @@ class RecoveryCoordinator:
         self._validate_ledger(candidate_root, required=True)
 
     def _migrate_n_minus_one(self, root: Path) -> None:
+        for path in (root / "canonical" / "sources").glob("*/source.md"):
+            manifest = _parse_document(path.read_text())
+            if manifest.get("schema_version") == "0.9.0":
+                self._failure("during_migration")
+                manifest["schema_version"] = "1.0.0"
+                _replace_file(path, _document(manifest))
         for path in (root / "canonical" / "objects").glob("*/*/object.md"):
             manifest = _parse_manifest(path.read_text())
             if manifest.get("schema_version") == "0.9.0":

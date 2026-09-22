@@ -182,7 +182,7 @@ class SingleWriterWorker:
                         return WorkerResult(WorkerStatus.COMMIT_UNCERTAIN, job_id, job["source_id"], str(exc))
                     shutil.rmtree(job_dir, ignore_errors=True)
                     return WorkerResult(WorkerStatus.ALREADY_COMMITTED, job_id, job["source_id"])
-            if result.status in {"IO_FAILED", "STALE_GENERATION"}:
+            if result.status in {"IO_FAILED", "STALE_GENERATION", "MAINTENANCE_IN_PROGRESS"}:
                 return self._retry(job_dir, job, result.reason)
             return self._quarantine(job_dir, result.reason or result.status)
         except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
