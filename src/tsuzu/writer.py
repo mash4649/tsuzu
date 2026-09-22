@@ -344,6 +344,36 @@ def _as_bytes(payload: bytes | str) -> bytes:
 @contextlib.contextmanager
 def shared_writer_lock(locator: ActiveVaultLocator) -> Iterator[VaultHandle]:
     """The one mutable-writer lock shared by A2 and C1."""
+    maintenance_path = locator.state_dir / "maintenance.lock"
+    with maintenance_path.open("a+") as maintenance:
+        try:
+            fcntl.flock(maintenance.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise WriterError("MAINTENANCE_IN_PROGRESS", "recovery maintenance is active") from exc
+        try:
+            with _shared_writer_lock(locator) as handle:
+                yield handle
+        finally:
+            fcntl.flock(maintenance.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def maintenance_lock(locator: ActiveVaultLocator) -> Iterator[None]:
+    """Freeze Canonical mutations while Recovery owns the cutover boundary."""
+    path = locator.state_dir / "maintenance.lock"
+    with path.open("a+") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise WriterError("MAINTENANCE_BUSY", "recovery maintenance is already active") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def _shared_writer_lock(locator: ActiveVaultLocator) -> Iterator[VaultHandle]:
     handle = locator.resolve_active_vault()
     system = handle.root_ref / "system"
     if system.is_symlink():
