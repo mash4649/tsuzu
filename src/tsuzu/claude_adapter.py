@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,7 @@ TOOL_NAME = "tsuzu_recall"
 MAX_QUERY_CHARS = 1_000
 MAX_RESULTS = 5
 MIN_HUMAN_APPROVAL_VERSION = (2, 1, 199)
+MIN_CHRONICLE_CAPTURE_VERSION = (2, 1, 269)
 
 
 class McpInputError(ValueError):
@@ -170,11 +172,16 @@ def verify_claude_capability() -> CapabilityReport:
             version = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=5, check=False).stdout.strip().split()[0]
         except (OSError, subprocess.SubprocessError):
             pass
-    state = VERIFIED if _version_at_least(version, MIN_HUMAN_APPROVAL_VERSION) else UNVERIFIED
+    recall_state = VERIFIED if _version_at_least(version, MIN_HUMAN_APPROVAL_VERSION) else UNVERIFIED
+    capture_state = VERIFIED if _version_at_least(version, MIN_CHRONICLE_CAPTURE_VERSION) and importlib.util.find_spec("claude_agent_sdk") else UNVERIFIED
     return CapabilityReport(
         "claude_code", "CLAUDE_CODE", version, _now(),
         "claude --version; anthropic/requiresUserInteraction minimum 2.1.199",
-        (Capability(EXPLICIT_RECALL, state, ("GLOBAL",), ("requiresUserInteraction",)),),
+        (
+            Capability(EXPLICIT_RECALL, recall_state, ("GLOBAL",), ("requiresUserInteraction",)),
+            Capability("CAPTURE_CONVERSATION", capture_state, ("PROJECT",), ("Agent SDK exact-session reader",)),
+            Capability("WATCH_SCOPED_SESSION", capture_state, ("PROJECT",), ("Agent SDK exact-session reader",)),
+        ),
         "TRUSTED_EXTERNAL",
     )
 

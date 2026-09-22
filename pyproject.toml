@@ -3,7 +3,7 @@ name = "tsuzu"
 version = "0.1.0"
 description = "Local-first TSUZU MVP runtime"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["claude-agent-sdk>=0.2.150"]
 
 [project.scripts]
 tsuzu = "tsuzu.__main__:main"

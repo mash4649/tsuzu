@@ -45,7 +45,7 @@ class ObjectRegistry:
             raise SourceValidationError("object_type already registered")
         if registration.storage_class not in {"CANONICAL", "DERIVED", "RUNTIME_ONLY"}:
             raise SourceValidationError("invalid storage class")
-        if registration.mutability not in {"IMMUTABLE", "REVISIONED"} or registration.body_mode not in {"NONE", "INLINE", "PAYLOAD"}:
+        if registration.mutability not in {"IMMUTABLE", "REVISIONED"} or registration.body_mode not in {"NONE", "INLINE", "PAYLOAD", "OPTIONAL_PAYLOAD"}:
             raise SourceValidationError("invalid object registration")
         if registration.storage_class == "RUNTIME_ONLY":
             raise SourceValidationError("runtime-only objects are not persistent")
@@ -113,7 +113,7 @@ class CanonicalStore:
             return CommitResult("VALIDATION_FAILED", intent.object_type, intent.object_id, reason=str(exc))
         if manifest["sensitivity"]["level"] == "RESTRICTED":
             return CommitResult("VALIDATION_FAILED", intent.object_type, intent.object_id, reason="RESTRICTED object requires owner guard")
-        fingerprint = _fingerprint(manifest)
+        fingerprint = _create_fingerprint(manifest)
         try:
             key_hash = _key_hash(intent.idempotency_key)
         except SourceValidationError as exc:
@@ -133,7 +133,7 @@ class CanonicalStore:
                 final = _object_path(canonical, intent.object_type, intent.object_id)
                 if final.exists() or final.is_symlink():
                     existing = self.inspect_canonical(intent.object_type, intent.object_id)
-                    if existing.status == "VALID" and _manifest_at(final) == manifest:
+                    if existing.status == "VALID" and _create_fingerprint(_manifest_at(final)) == fingerprint:
                         return CommitResult("ALREADY_COMMITTED", intent.object_type, intent.object_id, existing.revision, final)
                     return CommitResult("IDEMPOTENCY_CONFLICT", intent.object_type, intent.object_id, reason="existing object differs")
                 tx_root = system / "staging" / str(uuid.uuid4())
@@ -262,7 +262,7 @@ class CanonicalStore:
         manifest = copy.deepcopy(intent.manifest_fields)
         if "payload" in manifest:
             raise SourceValidationError("payload integrity is writer-owned")
-        if registration.body_mode == "PAYLOAD":
+        if registration.body_mode in {"PAYLOAD", "OPTIONAL_PAYLOAD"} and intent.payload is not None:
             if not isinstance(intent.payload, bytes):
                 raise SourceValidationError("payload bytes are required")
             manifest["payload"] = {
@@ -270,6 +270,8 @@ class CanonicalStore:
                 "sha256": hashlib.sha256(intent.payload).hexdigest(),
                 "bytes": len(intent.payload),
             }
+        elif registration.body_mode == "PAYLOAD":
+            raise SourceValidationError("payload bytes are required")
         manifest.update({
             "object_id": intent.object_id,
             "object_type": intent.object_type,
@@ -321,8 +323,10 @@ def _validate_manifest(manifest: object, registration: ObjectRegistration, paylo
     if isinstance(manifest["revision"], bool) or not isinstance(manifest["revision"], int) or manifest["revision"] < 1:
         raise SourceValidationError("invalid revision")
     _validate_envelope(manifest)
-    if registration.body_mode == "PAYLOAD":
+    if registration.body_mode in {"PAYLOAD", "OPTIONAL_PAYLOAD"}:
         details = manifest.get("payload")
+        if details is None and registration.body_mode == "OPTIONAL_PAYLOAD" and payload is None:
+            return
         if not isinstance(details, dict) or set(details) != {"path", "sha256", "bytes"} or details["path"] != "payload/original":
             raise SourceValidationError("payload metadata is required")
         if payload is None or not isinstance(payload, bytes) or details["bytes"] != len(payload) or details["sha256"] != hashlib.sha256(payload).hexdigest():
@@ -387,10 +391,14 @@ def _manifest_at(path: Path) -> dict[str, object]:
 
 
 def _payload_at(path: Path, registration: ObjectRegistration) -> bytes | None:
-    if registration.body_mode != "PAYLOAD":
+    if registration.body_mode not in {"PAYLOAD", "OPTIONAL_PAYLOAD"}:
         return None
     payload = path / "payload" / "original"
-    if payload.is_symlink() or not payload.exists():
+    if payload.is_symlink():
+        raise SourceValidationError("payload missing")
+    if registration.body_mode == "OPTIONAL_PAYLOAD" and not payload.exists():
+        return None
+    if not payload.exists():
         raise SourceValidationError("payload missing")
     return payload.read_bytes()
 
@@ -451,6 +459,13 @@ def _key_hash(value: str) -> str:
 
 def _fingerprint(value: object) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _create_fingerprint(manifest: dict[str, object]) -> str:
+    stable = copy.deepcopy(manifest)
+    stable.pop("created_at", None)
+    stable.pop("updated_at", None)
+    return _fingerprint(stable)
 
 
 def _append_receipt(path: Path, object_type: str, object_id: str, operation: str, key_hash: str, fingerprint: str, revision: int, payload_hash: str | None = None) -> None:

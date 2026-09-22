@@ -53,6 +53,15 @@ class CanonicalStoreTests(unittest.TestCase):
                 schema_owner="B5",
             )
         )
+        self.registry.register(
+            ObjectRegistration(
+                object_type="REDACTED_EVENT",
+                storage_class="CANONICAL",
+                mutability="IMMUTABLE",
+                body_mode="OPTIONAL_PAYLOAD",
+                schema_owner="B1",
+            )
+        )
         self.store = CanonicalStore(self.locator, self.registry)
 
     def tearDown(self):
@@ -122,6 +131,14 @@ class CanonicalStoreTests(unittest.TestCase):
         self.assertEqual(self.store.append_canonical_event(event).status, "COMMITTED_LOCAL")
         update = self.store.update_canonical(UpdateCanonicalIntent(event.object_type, event.object_id, 1, "u", {"sensitivity": {"level": "SENSITIVE"}}))
         self.assertEqual(update.status, "VALIDATION_FAILED")
+
+    def test_optional_payload_is_body_free_and_retry_ignores_writer_timestamps(self):
+        event = CreateCanonicalIntent("REDACTED_EVENT", "66666666-6666-4666-8666-666666666666", "1.0.0", "2026-09-12T00:00:00.000Z", "redacted-1", envelope())
+        first = self.store.append_canonical_event(event)
+        retry = CreateCanonicalIntent(event.object_type, event.object_id, event.schema_version, "2026-09-12T00:01:00.000Z", event.idempotency_key, event.manifest_fields)
+        self.assertEqual(first.status, "COMMITTED_LOCAL")
+        self.assertEqual(self.store.append_canonical_event(retry).status, "ALREADY_COMMITTED")
+        self.assertFalse((first.path / "payload").exists())
 
     def test_restricted_and_stale_generation_are_rejected(self):
         restricted = self.intent()
