@@ -27,6 +27,10 @@ from .source import SourceValidationError, parse_source, validate_payload
 from .vault import ActiveVaultLocator
 from .writer import AtomicSourceWriter
 
+_X_ROUTE_CLASSES = frozenset({"OFFICIAL_API_BYOK", "PUBLIC_ORIGIN_FETCH", "AUTHORIZED_BROWSER_SESSION", "GROK_ASSISTED_RESCUE"})
+_X_FIDELITIES = frozenset({"ORIGIN_VERBATIM", "ORIGIN_RENDERED", "INTERMEDIARY_RECONSTRUCTION", "METADATA_ONLY"})
+_COMPLETENESS_STATES = frozenset({"COMPLETE", "PARTIAL", "UNKNOWN", "METADATA_ONLY"})
+
 
 @dataclass(frozen=True)
 class FetchRequest:
@@ -51,10 +55,11 @@ class FetchResult:
     http_status: int | None = None
     failure_code: str | None = None
     redirect_chain: tuple[str, ...] = ()
+    acquisition: dict[str, object] | None = None
 
     @classmethod
-    def success(cls, *, final_url: str, body: bytes, media_type: str, http_status: int = 200, redirect_chain: tuple[str, ...] = ()) -> "FetchResult":
-        return cls("SUCCESS", final_url, body, media_type, http_status, redirect_chain=redirect_chain)
+    def success(cls, *, final_url: str, body: bytes, media_type: str, http_status: int = 200, redirect_chain: tuple[str, ...] = (), acquisition: dict[str, object] | None = None) -> "FetchResult":
+        return cls("SUCCESS", final_url, body, media_type, http_status, redirect_chain=redirect_chain, acquisition=acquisition)
 
     @classmethod
     def auth_required(cls) -> "FetchResult":
@@ -230,14 +235,14 @@ class AcquisitionService:
         if parent is None:
             return AcquisitionResult("SOURCE_NOT_ELIGIBLE", source_id)
         url, manifest = parent
-        acquisition_key = _acquisition_key(source_id, manifest)
+        if not _valid_adapter(adapter):
+            return AcquisitionResult("PERMANENT_FAILURE", source_id, reason="malformed adapter")
+        acquisition_key = _acquisition_key(source_id, manifest, getattr(adapter, "acquisition_policy_version", "r1-public-web-1"))
         version_id = _version_id(acquisition_key)
         if self.store.inspect_canonical("SOURCE_VERSION", version_id).status == "VALID":
             return self._record(AcquisitionResult("ALREADY_ACQUIRED", source_id, acquisition_key, version_id))
         if not self._public_url(url):
             return self._record(AcquisitionResult("POLICY_BLOCKED", source_id, acquisition_key, reason="unsafe URL"))
-        if not callable(getattr(adapter, "fetch", None)) or not isinstance(getattr(adapter, "adapter_id", None), str) or not getattr(adapter, "adapter_id") or not isinstance(getattr(adapter, "adapter_version", None), str) or not getattr(adapter, "adapter_version"):
-            return self._record(AcquisitionResult("PERMANENT_FAILURE", source_id, acquisition_key, reason="malformed adapter"))
         request = FetchRequest(str(uuid.uuid4()), source_id, url, max_response_bytes=max_response_bytes)
         try:
             fetched = adapter.fetch(request)
@@ -253,12 +258,28 @@ class AcquisitionService:
             return self._record(AcquisitionResult("POLICY_BLOCKED", source_id, acquisition_key, reason="unsafe redirect"))
         if not isinstance(fetched.body, bytes) or fetched.media_type not in {"text/plain", "text/html", "text/markdown", "application/json"}:
             return self._record(AcquisitionResult("PERMANENT_FAILURE", source_id, acquisition_key, reason="malformed success result"))
+        if not _valid_acquisition(fetched.acquisition):
+            return self._record(AcquisitionResult("PERMANENT_FAILURE", source_id, acquisition_key, reason="malformed acquisition provenance"))
         if len(fetched.body) > max_response_bytes:
             return self._record(AcquisitionResult("PERMANENT_FAILURE", source_id, acquisition_key, reason="TOO_LARGE"))
         if self.scanner.scan_bytes(fetched.body).outcome != "CLEAR":
             return self._record(AcquisitionResult("BLOCKED_RESTRICTED", source_id, acquisition_key, reason="ACQUISITION_BLOCKED_RESTRICTED"))
         if self._live_url_source(source_id) is None:
             return self._record(AcquisitionResult("SOURCE_DELETED", source_id, acquisition_key))
+        acquisition = {
+            "adapter_id": adapter.adapter_id,
+            "adapter_version": adapter.adapter_version,
+            "requested_url_hash": _hash(url),
+            "final_url_hash": _hash(fetched.final_url),
+            "http_status": fetched.http_status,
+            "media_type": fetched.media_type,
+            "fidelity": "ORIGIN_RESPONSE",
+            "acquisition_key_hash": acquisition_key,
+            **(fetched.acquisition or {}),
+        }
+        prior_version_id = self._lower_fidelity_x_version(source_id, acquisition)
+        if prior_version_id:
+            acquisition["better_representation_of"] = prior_version_id
         intent = CreateCanonicalIntent(
             "SOURCE_VERSION", version_id, "1.0.0", _now(), acquisition_key,
             {
@@ -270,7 +291,7 @@ class AcquisitionService:
                 "deletion": {"state": "LIVE", "tombstoned_at": None},
                 "parent_source_id": source_id,
                 "version_kind": "ACQUIRED_REMOTE",
-                "acquisition": {"adapter_id": adapter.adapter_id, "adapter_version": adapter.adapter_version, "requested_url_hash": _hash(url), "final_url_hash": _hash(fetched.final_url), "http_status": fetched.http_status, "media_type": fetched.media_type, "fidelity": "ORIGIN_RESPONSE", "acquisition_key_hash": acquisition_key},
+                "acquisition": acquisition,
             },
             fetched.body,
         )
@@ -356,6 +377,33 @@ class AcquisitionService:
             _write_json_atomic(path, {"source_id": result.source_id, "acquisition_key_hash": result.acquisition_key, "terminal_status": result.status, "source_version_id": result.source_version_id, "failure_code": result.status, "completed_at": _now()}, staged=staged)
         return result
 
+    def _lower_fidelity_x_version(self, source_id: str, acquisition: dict[str, object]) -> str | None:
+        if acquisition.get("route_class") not in _X_ROUTE_CLASSES:
+            return None
+        rank = {"METADATA_ONLY": 0, "INTERMEDIARY_RECONSTRUCTION": 1, "ORIGIN_RENDERED": 2, "ORIGIN_VERBATIM": 3}
+        current_rank = rank.get(acquisition.get("fidelity"), -1)
+        root = self.locator.resolve_active_vault().root_ref / "canonical" / "objects" / "SOURCE_VERSION"
+        if root.is_symlink() or not root.exists():
+            return None
+        # ponytail: linear scan until SOURCE_VERSION indexing is needed.
+        candidates: list[tuple[int, str]] = []
+        for path in root.iterdir():
+            if path.is_symlink() or not path.is_dir() or self.store.inspect_canonical("SOURCE_VERSION", path.name).status != "VALID":
+                continue
+            try:
+                manifest = json.loads((path / "object.md").read_text()[4:-5])
+                prior = manifest.get("acquisition", {})
+                prior_rank = rank.get(prior.get("fidelity"), -1)
+                if (
+                    manifest.get("parent_source_id") == source_id
+                    and prior.get("route_class") in _X_ROUTE_CLASSES
+                    and 0 <= prior_rank < current_rank
+                ):
+                    candidates.append((prior_rank, path.name))
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+        return max(candidates, default=(-1, None))[1]
+
 
 def _resolve_host(host: str) -> list[str]:
     return sorted({item[4][0] for item in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)})
@@ -372,9 +420,44 @@ def _public_address(raw: str, resolver: Callable[[str], list[str]]) -> str | Non
         return None
 
 
-def _acquisition_key(source_id: str, manifest: dict[str, object]) -> str:
+def _acquisition_key(source_id: str, manifest: dict[str, object], policy_version: str = "r1-public-web-1") -> str:
     source = manifest["source"]
-    return _hash(f"{source_id}:{manifest['revision']}:{source['payload_sha256']}:r1-public-web-1")
+    return _hash(f"{source_id}:{manifest['revision']}:{source['payload_sha256']}:{policy_version}")
+
+
+def _valid_acquisition(value: dict[str, object] | None) -> bool:
+    if value is None:
+        return True
+    required = {"route_id", "route_class", "fidelity", "completeness", "external_item_id"}
+    if (
+        set(value) != required
+        or not all(isinstance(value[key], str) and value[key] for key in ("route_id", "route_class", "fidelity"))
+        or value["route_class"] not in _X_ROUTE_CLASSES
+        or value["fidelity"] not in _X_FIDELITIES
+    ):
+        return False
+    completeness = value["completeness"]
+    if (
+        not isinstance(completeness, dict)
+        or set(completeness) != {"state", "expected_segments", "captured_segments", "missing_reason"}
+        or completeness["state"] not in _COMPLETENESS_STATES
+    ):
+        return False
+    return (
+        all(item is None or (isinstance(item, int) and not isinstance(item, bool) and item >= 0) for item in (completeness["expected_segments"], completeness["captured_segments"]))
+        and (completeness["missing_reason"] is None or isinstance(completeness["missing_reason"], str))
+        and (value["external_item_id"] is None or isinstance(value["external_item_id"], str))
+    )
+
+
+def _valid_adapter(adapter: object) -> bool:
+    return (
+        callable(getattr(adapter, "fetch", None))
+        and isinstance(getattr(adapter, "adapter_id", None), str)
+        and bool(adapter.adapter_id)
+        and isinstance(getattr(adapter, "adapter_version", None), str)
+        and bool(adapter.adapter_version)
+    )
 
 
 def _version_id(key: str) -> str:

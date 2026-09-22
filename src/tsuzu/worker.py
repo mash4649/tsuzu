@@ -122,6 +122,9 @@ class SingleWriterWorker:
                 plan.get("original_name"),
                 plan["scope"],
                 plan["origin_locator"],
+                capture_method=plan["capture_method"],
+                provenance=plan.get("provenance"),
+                import_metadata=plan.get("import"),
             )
             if expected_fingerprint != job["fingerprint"]:
                 return self._quarantine(job_dir, "request fingerprint mismatch")
@@ -140,6 +143,8 @@ class SingleWriterWorker:
                 original_name=plan.get("original_name"),
                 origin_locator=plan.get("origin_locator"),
                 sensitivity=plan["effective_sensitivity"],
+                provenance=plan.get("provenance"),
+                import_metadata=plan.get("import"),
             )
             try:
                 self._failure("after_canonical")

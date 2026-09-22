@@ -36,6 +36,9 @@ class CaptureRequest:
     user_metadata: dict[str, object] | None = None
     sensitivity_override: str | None = None
     requested_at: str | None = None
+    capture_method: str | None = None
+    provenance: dict[str, object] | None = None
+    import_metadata: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -143,6 +146,12 @@ class CaptureService:
             return CaptureResult(CaptureStatus.REJECTED_INVALID_INPUT, reason="unsupported capture kind")
         try:
             if kind == "FILE":
+                if isinstance(request.content, bytes):
+                    if not request.content:
+                        return CaptureResult(CaptureStatus.REJECTED_INVALID_INPUT, reason="empty input")
+                    if len(request.content) > self.max_file_bytes:
+                        return CaptureResult(CaptureStatus.REJECTED_TOO_LARGE, reason="file exceeds limit")
+                    return self._accept(request, "FILE", request.content, self.scanner.scan_bytes(request.content), original_name=request.original_name)
                 return self._capture_file(request)
             raw = _as_utf8_bytes(request.content)
             if not raw:
@@ -213,7 +222,14 @@ class CaptureService:
             return CaptureResult(CaptureStatus.REJECTED_RESTRICTED, reason="restricted sensitivity is not queueable")
         scope = _scope(request.user_metadata)
         origin_locator = {"type": "URL", "value": raw.decode("utf-8")} if kind == "URL" else {"type": "NONE", "value": None}
-        fingerprint = _fingerprint(kind, scan.payload_sha256, len(raw), sensitivity, original_name, scope, origin_locator)
+        method = request.capture_method or f"LOCAL_{kind}"
+        provenance = request.provenance
+        import_metadata = request.import_metadata
+        _validate_ingress(kind, method, provenance, import_metadata)
+        fingerprint = _fingerprint(
+            kind, scan.payload_sha256, len(raw), sensitivity, original_name, scope, origin_locator,
+            capture_method=method, provenance=provenance, import_metadata=import_metadata,
+        )
         key_hash = hashlib.sha256(request.idempotency_key.encode()).hexdigest()
         if request.requested_at is not None:
             _validate_timestamp(request.requested_at)
@@ -226,7 +242,7 @@ class CaptureService:
         requested_at = request.requested_at or _now()
         plan = {
             "kind": kind,
-            "capture_method": f"LOCAL_{kind}",
+            "capture_method": method,
             "media_type": "text/plain" if kind == "TEXT" else "text/uri-list" if kind == "URL" else "application/octet-stream",
             "original_name": original_name,
             "origin_locator": origin_locator,
@@ -234,6 +250,10 @@ class CaptureService:
             "effective_sensitivity": sensitivity,
             "captured_at": requested_at,
         }
+        if provenance is not None:
+            plan["provenance"] = provenance
+        if import_metadata is not None:
+            plan["import"] = import_metadata
         job = {
             "job_id": job_id,
             "job_schema_version": "1.0.0",
@@ -364,8 +384,12 @@ def _scope(metadata: dict[str, object] | None) -> dict[str, object]:
     return value
 
 
-def _fingerprint(kind: str, digest: str, size: int, sensitivity: str, original_name: str | None, scope: dict[str, object], origin_locator: dict[str, object]) -> str:
-    value = {"kind": kind, "capture_method": f"LOCAL_{kind}", "sha256": digest, "bytes": size, "sensitivity": sensitivity, "original_name": original_name, "scope": scope, "origin_locator": origin_locator}
+def _fingerprint(
+    kind: str, digest: str, size: int, sensitivity: str, original_name: str | None, scope: dict[str, object], origin_locator: dict[str, object],
+    *, capture_method: str | None = None, provenance: dict[str, object] | None = None, import_metadata: dict[str, object] | None = None,
+) -> str:
+    stable_import = None if import_metadata is None else {key: value for key, value in import_metadata.items() if key != "import_session_id"}
+    value = {"kind": kind, "capture_method": capture_method or f"LOCAL_{kind}", "sha256": digest, "bytes": size, "sensitivity": sensitivity, "original_name": original_name, "scope": scope, "origin_locator": origin_locator, "provenance": provenance, "import": stable_import}
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -393,6 +417,26 @@ def _validate_job(job: object, job_id: str) -> None:
     guard = job.get("guard")
     if not isinstance(guard, dict) or not isinstance(guard.get("secret_ruleset_version"), str) or guard.get("matched_rule_ids") != []:
         raise ValueError("invalid guard metadata")
+    plan = job.get("source_plan")
+    if not isinstance(plan, dict):
+        raise ValueError("invalid source plan")
+    _validate_ingress(plan.get("kind"), plan.get("capture_method"), plan.get("provenance"), plan.get("import"))
+
+
+def _validate_ingress(kind: object, capture_method: object, provenance: object, import_metadata: object) -> None:
+    allowed = {
+        "TEXT": {"LOCAL_TEXT", "IMPORT_APPLE_NOTES", "IMPORT_MARKDOWN", "IOS_SHARE_TEXT"},
+        "URL": {"LOCAL_URL", "IMPORT_APPLE_NOTES", "IMPORT_MARKDOWN", "IOS_SHARE_URL"},
+        "FILE": {"LOCAL_FILE", "IMPORT_APPLE_NOTES", "IMPORT_MARKDOWN", "IOS_SHARE_FILE"},
+    }
+    if kind not in allowed or capture_method not in allowed[kind]:
+        raise ValueError("invalid capture ingress")
+    imported = str(capture_method).startswith("IMPORT_")
+    if imported:
+        if provenance != {"origin": "IMPORTED", "source_refs": [], "actor": "USER", "explicitness": "IMPORT_REQUESTED"} or not isinstance(import_metadata, dict):
+            raise ValueError("invalid import ingress")
+    elif provenance is not None or import_metadata is not None:
+        raise ValueError("unexpected ingress metadata")
 
 
 def _is_regular(mode: int) -> bool:

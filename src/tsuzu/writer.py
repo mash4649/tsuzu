@@ -76,6 +76,8 @@ class AtomicSourceWriter:
         original_name: str | None = None,
         origin_locator: dict[str, object] | None = None,
         sensitivity: str = "PERSONAL",
+        provenance: dict[str, object] | None = None,
+        import_metadata: dict[str, object] | None = None,
     ) -> WriteResult:
         source_id = object_id or ""
         try:
@@ -88,6 +90,8 @@ class AtomicSourceWriter:
                 origin_locator=origin_locator,
                 sensitivity=sensitivity,
                 captured_at=created_at,
+                provenance=provenance,
+                import_metadata=import_metadata,
             )
         except SourceValidationError as exc:
             return WriteResult("VALIDATION_FAILED", source_id, reason=str(exc))

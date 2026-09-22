@@ -12,7 +12,11 @@ from urllib.parse import urlparse
 
 
 SCHEMA_VERSION = "1.0.0"
-_SOURCE_METHODS = {"TEXT": "LOCAL_TEXT", "URL": "LOCAL_URL", "FILE": "LOCAL_FILE"}
+_SOURCE_METHODS = {
+    "TEXT": {"LOCAL_TEXT", "IMPORT_APPLE_NOTES", "IMPORT_MARKDOWN", "IOS_SHARE_TEXT"},
+    "URL": {"LOCAL_URL", "IMPORT_APPLE_NOTES", "IMPORT_MARKDOWN", "IOS_SHARE_URL"},
+    "FILE": {"LOCAL_FILE", "IMPORT_APPLE_NOTES", "IMPORT_MARKDOWN", "IOS_SHARE_FILE"},
+}
 _TOP_LEVEL = {
     "object_id",
     "object_type",
@@ -56,8 +60,10 @@ def create_source(
     origin_locator: dict[str, object] | None = None,
     sensitivity: str = "PERSONAL",
     captured_at: str | None = None,
+    provenance: dict[str, object] | None = None,
+    import_metadata: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    if kind not in _SOURCE_METHODS or capture_method != _SOURCE_METHODS[kind]:
+    if kind not in _SOURCE_METHODS or capture_method not in _SOURCE_METHODS[kind]:
         raise SourceValidationError("source kind and capture method do not match")
     if kind == "FILE" and isinstance(payload, str):
         raise SourceValidationError("FILE payload must be bytes")
@@ -82,7 +88,7 @@ def create_source(
         "updated_at": now,
         "revision": 1,
         "scope": {"scope_type": "GLOBAL", "scope_id": None},
-        "provenance": {
+        "provenance": provenance or {
             "origin": "USER_EXPLICIT",
             "source_refs": [],
             "actor": "USER",
@@ -105,6 +111,8 @@ def create_source(
             "captured_at": now,
         },
     }
+    if import_metadata is not None:
+        source["import"] = import_metadata
     validate_source(source)
     return source
 
@@ -112,7 +120,7 @@ def create_source(
 def validate_source(
     manifest: object, *, expected_object_id: str | None = None
 ) -> None:
-    if not isinstance(manifest, dict) or set(manifest) != _TOP_LEVEL:
+    if not isinstance(manifest, dict) or (set(manifest) != _TOP_LEVEL and set(manifest) != _TOP_LEVEL | {"import"}):
         raise SourceValidationError("Source envelope fields are invalid")
     if manifest["object_type"] != "SOURCE" or manifest["schema_version"] != SCHEMA_VERSION:
         raise SourceValidationError("unsupported Source type or schema version")
@@ -140,7 +148,7 @@ def validate_source(
         raise SourceValidationError("source_refs must be a string list")
     if not isinstance(provenance["actor"], str) or not provenance["actor"]:
         raise SourceValidationError("invalid provenance actor")
-    if provenance["explicitness"] not in {"EXPLICIT", "IMPORTED"}:
+    if provenance["explicitness"] not in {"EXPLICIT", "IMPORTED", "IMPORT_REQUESTED"}:
         raise SourceValidationError("invalid provenance explicitness")
 
     trust = _mapping(manifest["trust"], {"level", "confidence"})
@@ -164,7 +172,7 @@ def validate_source(
 
     source = _mapping(manifest["source"], _SOURCE_FIELDS)
     kind = source["kind"]
-    if kind not in _SOURCE_METHODS or source["capture_method"] != _SOURCE_METHODS[kind]:
+    if kind not in _SOURCE_METHODS or source["capture_method"] not in _SOURCE_METHODS[kind]:
         raise SourceValidationError("invalid source kind or capture method")
     expected_media = {"TEXT": "text/plain", "URL": "text/uri-list", "FILE": "application/octet-stream"}[kind]
     expected_encoding = "binary" if kind == "FILE" else "utf-8"
@@ -185,6 +193,13 @@ def validate_source(
     if isinstance(source["payload_bytes"], bool) or not isinstance(source["payload_bytes"], int) or source["payload_bytes"] < 0:
         raise SourceValidationError("invalid payload length")
     _timestamp(source["captured_at"])
+    imported = source["capture_method"].startswith("IMPORT_")
+    if imported != ("import" in manifest):
+        raise SourceValidationError("import metadata must match import capture method")
+    if imported:
+        if provenance != {"origin": "IMPORTED", "source_refs": [], "actor": "USER", "explicitness": "IMPORT_REQUESTED"}:
+            raise SourceValidationError("invalid import provenance")
+        _validate_import(manifest["import"])
 def validate_payload(manifest: object, payload: bytes | None) -> bool:
     try:
         validate_source(manifest)
@@ -240,6 +255,29 @@ def _mapping(value: object, keys: set[str]) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) != keys:
         raise SourceValidationError("invalid nested Source object")
     return value
+
+
+def _validate_import(value: object) -> None:
+    fields = {"adapter_id", "external_item_key_hash", "external_modified_at_observed", "import_session_id", "previous_snapshot_ref"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise SourceValidationError("invalid import metadata")
+    if value["adapter_id"] not in {"APPLE_NOTES", "MARKDOWN_FOLDER"}:
+        raise SourceValidationError("invalid import adapter")
+    if not isinstance(value["external_item_key_hash"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["external_item_key_hash"]):
+        raise SourceValidationError("invalid external item hash")
+    _timestamp(value["external_modified_at_observed"])
+    _uuid4(value["import_session_id"], "import session")
+    if value["previous_snapshot_ref"] is not None:
+        _uuid4(value["previous_snapshot_ref"], "previous snapshot")
+
+
+def _uuid4(value: object, label: str) -> None:
+    try:
+        parsed = uuid.UUID(str(value))
+    except (ValueError, AttributeError) as exc:
+        raise SourceValidationError(f"{label} must be UUIDv4") from exc
+    if parsed.version != 4 or str(parsed) != value:
+        raise SourceValidationError(f"{label} must be UUIDv4")
 
 
 def _timestamp(value: object) -> None:
