@@ -10,6 +10,9 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
+
+from .deletion import DeletionResolver, NOT_DELETED
 
 
 class DerivedStatus:
@@ -19,6 +22,12 @@ class DerivedStatus:
     CLAIMED = "CLAIMED"
     NO_READY_JOB = "NO_READY_JOB"
     CORRUPT_QUEUE = "CORRUPT_QUEUE"
+    READY = "READY"
+    BLOCKED_STALE = "BLOCKED_STALE"
+    RETRY_WAIT = "RETRY_WAIT"
+    SUCCEEDED = "SUCCEEDED"
+    PERMANENT_FAILURE = "PERMANENT_FAILURE"
+    CLAIM_MISMATCH = "CLAIM_MISMATCH"
 
 
 JOB_TYPES = frozenset({
@@ -52,9 +61,17 @@ class DerivedClaim:
     attempt_count: int = 0
 
 
+@dataclass(frozen=True)
+class DerivedPreflight:
+    status: str
+    job_id: str | None = None
+    reason: str = ""
+
+
 class DerivedJobQueue:
-    def __init__(self, root: str | os.PathLike[str]):
+    def __init__(self, root: str | os.PathLike[str], *, deletion_resolver: DeletionResolver | None = None):
         self.root = Path(root)
+        self.deletion_resolver = deletion_resolver
 
     def enqueue(self, request: DerivedJobRequest) -> DerivedJobResult:
         try:
@@ -112,8 +129,80 @@ class DerivedJobQueue:
             job["attempt_count"] = int(job["attempt_count"]) + 1
             job["lease_owner"] = worker_id
             job["lease_expires_at"] = _format_time(moment + timedelta(seconds=lease_seconds))
+            job.pop("preflight_fingerprint", None)
+            job.pop("preflight_at", None)
             _atomic_json(jobs / f"{job['job_id']}.json", job)
             return DerivedClaim(DerivedStatus.CLAIMED, str(job["job_id"]), int(job["attempt_count"]))
+
+    def preflight(self, job_id: str, worker_id: str, validate_inputs: Callable[[tuple[tuple[str, str, int, str], ...]], bool]) -> DerivedPreflight:
+        """Recheck C3; the owner callback re-reads hashes/schema/sensitivity and applies A3/A7."""
+        if not _valid_worker(worker_id) or not callable(validate_inputs):
+            return DerivedPreflight(DerivedStatus.VALIDATION_FAILED, job_id)
+        with self._locked_jobs() as jobs:
+            job = _job_for_worker(jobs, job_id, worker_id)
+            if job is None:
+                return DerivedPreflight(DerivedStatus.CLAIM_MISMATCH, job_id)
+            if self.deletion_resolver is None:
+                return self._block(jobs, job, "DELETION_RESOLVER_REQUIRED")
+            try:
+                refs = tuple(_normalize_refs(tuple(tuple(item) for item in job["input_refs"])))
+            except (KeyError, TypeError, ValueError):
+                return DerivedPreflight(DerivedStatus.CORRUPT_QUEUE, job_id, "invalid input references")
+            for object_type, object_id, _, _ in refs:
+                if self.deletion_resolver.resolve(object_type, object_id).state != NOT_DELETED:
+                    return self._block(jobs, job, "INPUT_NOT_ELIGIBLE")
+            try:
+                valid = validate_inputs(refs)
+            except Exception:
+                valid = False
+            if valid is not True:
+                return self._block(jobs, job, "INPUT_STALE_OR_INVALID")
+            job["preflight_fingerprint"] = job["input_fingerprint"]
+            job["preflight_at"] = _now()
+            _atomic_json(jobs / f"{job_id}.json", job)
+            return DerivedPreflight(DerivedStatus.READY, job_id)
+
+    def settle(self, job_id: str, worker_id: str, state: str, *, output_refs: tuple[tuple[str, str, int, str], ...] = (), failure_code: str | None = None, next_attempt_at: str | None = None) -> DerivedJobResult:
+        """Record an owner materialization result; SUCCEEDED requires current preflight."""
+        if state not in {"SUCCEEDED", "RETRY_WAIT", "PERMANENT_FAILURE"}:
+            return DerivedJobResult(DerivedStatus.VALIDATION_FAILED, job_id, "invalid terminal state")
+        with self._locked_jobs() as jobs:
+            job = _job_for_worker(jobs, job_id, worker_id)
+            if job is None:
+                return DerivedJobResult(DerivedStatus.CLAIM_MISMATCH, job_id)
+            if state == "SUCCEEDED" and job.get("preflight_fingerprint") != job.get("input_fingerprint"):
+                return self._block_result(jobs, job, "PREFLIGHT_REQUIRED")
+            if state == "RETRY_WAIT":
+                try:
+                    _parse_time(next_attempt_at or "")
+                except (TypeError, ValueError):
+                    return DerivedJobResult(DerivedStatus.VALIDATION_FAILED, job_id, "retry time is required")
+                job["next_attempt_at"] = next_attempt_at
+            else:
+                job["next_attempt_at"] = None
+            if state == "SUCCEEDED":
+                try:
+                    job["output_refs"] = _normalize_refs(output_refs)
+                except ValueError as exc:
+                    return DerivedJobResult(DerivedStatus.VALIDATION_FAILED, job_id, str(exc))
+            job["state"] = state
+            job["last_failure_code"] = failure_code
+            job["lease_owner"] = None
+            job["lease_expires_at"] = None
+            _atomic_json(jobs / f"{job_id}.json", job)
+            return DerivedJobResult(state, job_id)
+
+    def _block(self, jobs: Path, job: dict[str, object], reason: str) -> DerivedPreflight:
+        self._block_result(jobs, job, reason)
+        return DerivedPreflight(DerivedStatus.BLOCKED_STALE, str(job["job_id"]), reason)
+
+    def _block_result(self, jobs: Path, job: dict[str, object], reason: str) -> DerivedJobResult:
+        job["state"] = "BLOCKED_STALE"
+        job["last_failure_code"] = reason
+        job["lease_owner"] = None
+        job["lease_expires_at"] = None
+        _atomic_json(jobs / f"{job['job_id']}.json", job)
+        return DerivedJobResult(DerivedStatus.BLOCKED_STALE, str(job["job_id"]), reason)
 
     def _locked_jobs(self):
         return _JobLock(self.root)
@@ -139,8 +228,17 @@ class _JobLock:
 def _normalize(request: DerivedJobRequest) -> dict[str, object]:
     if request.job_type not in JOB_TYPES or (request.scope != "GLOBAL" and not request.scope.startswith("PROJECT:")) or not all(isinstance(value, str) and value for value in (request.algorithm_version, request.policy_version, request.trigger_ref)):
         raise ValueError("invalid job request")
-    refs = []
-    for item in request.input_refs:
+    refs = _normalize_refs(request.input_refs)
+    if not refs:
+        raise ValueError("input references are required")
+    return {"job_type": request.job_type, "input_refs": refs, "algorithm_version": request.algorithm_version, "policy_version": request.policy_version, "scope": request.scope}
+
+
+def _normalize_refs(refs: object) -> list[tuple[str, str, int, str]]:
+    if not isinstance(refs, tuple):
+        raise ValueError("invalid input reference")
+    normalized = []
+    for item in refs:
         if not isinstance(item, tuple) or len(item) != 4:
             raise ValueError("invalid input reference")
         object_type, object_id, revision, content_hash = item
@@ -150,10 +248,22 @@ def _normalize(request: DerivedJobRequest) -> dict[str, object]:
             raise ValueError("invalid input object id") from exc
         if not isinstance(object_type, str) or not object_type or parsed.version != 4 or str(parsed) != object_id or not isinstance(revision, int) or isinstance(revision, bool) or revision < 1 or not isinstance(content_hash, str) or len(content_hash) != 64 or any(char not in "0123456789abcdef" for char in content_hash):
             raise ValueError("invalid input reference")
-        refs.append((object_type, object_id, revision, content_hash))
-    if not refs:
-        raise ValueError("input references are required")
-    return {"job_type": request.job_type, "input_refs": sorted(refs), "algorithm_version": request.algorithm_version, "policy_version": request.policy_version, "scope": request.scope}
+        normalized.append((object_type, object_id, revision, content_hash))
+    return sorted(normalized)
+
+
+def _valid_worker(worker_id: object) -> bool:
+    return isinstance(worker_id, str) and bool(worker_id)
+
+
+def _job_for_worker(jobs: Path, job_id: str, worker_id: str) -> dict[str, object] | None:
+    if not _valid_worker(worker_id) or not isinstance(job_id, str):
+        return None
+    try:
+        job = _read(jobs / f"{job_id}.json")
+    except ValueError:
+        return None
+    return job if job.get("state") == "RUNNING" and job.get("lease_owner") == worker_id else None
 
 
 def _claimable(job: dict[str, object], now: datetime) -> bool:
