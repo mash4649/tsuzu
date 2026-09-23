@@ -71,6 +71,18 @@ bd close <id>         # Complete work
 
 ## Session Completion
 
+## Issue Closure
+
+**Immediately after closing any Beads issue**, commit its scoped changes and push them:
+
+```bash
+git pull --rebase
+git push
+git status  # MUST show "up to date with origin"
+```
+
+Do not defer this synchronization until the end of a session.
+
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
 
 **MANDATORY WORKFLOW:**
