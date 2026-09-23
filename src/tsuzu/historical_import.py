@@ -75,7 +75,7 @@ class MarkdownFolderAdapter:
 
 
 _APPLE_NOTES_SELECTED_NOTE_SCRIPT = r'''
-const notes = Application("Notes");
+const notes = Application("/System/Applications/Notes.app");
 const selected = notes.selection();
 if (selected.length !== 1) {
   throw new Error("Select exactly one Apple Note before importing.");

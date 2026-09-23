@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 from .capability import CapabilityRegistry
 from .claude_adapter import ClaudeHostAdapter, ClaudeMcpServer, serve_stdio, verify_claude_capability, verify_codex_capability, verify_cursor_capability
@@ -37,7 +38,11 @@ def main() -> None:
     args = build_parser().parse_args()
     locator = ActiveVaultLocator(args.control_root)
     if args.command == "apple-notes-import":
-        result = HistoricalImporter(args.queue_root, locator).import_items("APPLE_NOTES", AppleNotesAdapter().enumerate(), recent_n=1)
+        try:
+            result = HistoricalImporter(args.queue_root, locator).import_items("APPLE_NOTES", AppleNotesAdapter().enumerate(), recent_n=1)
+        except ValueError:
+            print("ACTION_REQUIRED", file=sys.stderr)
+            raise SystemExit(2)
         print(result.import_session_id, result.committed_count, result.already_imported_count, result.blocked_count, result.failed_count)
         return
     index = IndexManager(args.index_root, locator)
