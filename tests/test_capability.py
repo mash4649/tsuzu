@@ -14,9 +14,9 @@ class CapabilityTests(unittest.TestCase):
 
     def test_version_invalidation_removes_support(self):
         registry = CapabilityRegistry()
-        registry.publish(CapabilityReport("claude_code", "CLAUDE_CODE", "1", "2026-09-12T00:00:00.000Z", "runtime", (Capability("EXPLICIT_RECALL", VERIFIED),), "TRUSTED_EXTERNAL"))
-        registry.invalidate_report("claude_code", "version changed")
-        self.assertEqual(registry.get_capability_report("claude_code").capabilities[0].state, UNVERIFIED)
+        registry.publish(CapabilityReport("codex", "CODEX", "0.144.1", "2026-09-12T00:00:00.000Z", "runtime", (Capability("EXPLICIT_RECALL", VERIFIED),), "TRUSTED_EXTERNAL"))
+        registry.invalidate_report("codex", "version changed")
+        self.assertEqual(registry.get_capability_report("codex").capabilities[0].state, UNVERIFIED)
 
 
 if __name__ == "__main__":

@@ -93,7 +93,16 @@ class ClaudeHostAdapterTests(unittest.TestCase):
 
         self.assertEqual(adapter.adapter_id, "codex")
         self.assertNotIn("anthropic/requiresUserInteraction", adapter.tool_definitions()[0]["_meta"])
-        self.assertEqual(adapter.recall({"query": "absent"})["structuredContent"]["status"], "NO_ELIGIBLE_CONTEXT")
+        source_id = "55555555-5555-4555-8555-555555555555"
+        self.writer.create_source("Codex trace parity fixture", kind="TEXT", capture_method="LOCAL_TEXT", object_id=source_id)
+        self.index.upsert_source(source_id)
+        response = adapter.recall({"query": "trace parity"})["structuredContent"]
+        self.assertEqual(response["status"], "OK")
+        self.assertEqual(response["items"][0]["sourceId"], source_id)
+        self.assertEqual(response["items"][0]["contentRole"], "UNTRUSTED_DATA")
+        self.assertEqual(response["items"][0]["sourceTrace"]["root_source_id"], source_id)
+        with self.assertRaises(McpInputError):
+            adapter.recall({"query": "trace parity", "scope": "PROJECT"})
 
     def test_stdio_protocol_discovers_one_tool_and_rejects_invalid_args(self):
         server = ClaudeMcpServer(self.adapter)
