@@ -153,6 +153,12 @@ class ClaudeHostAdapterTests(unittest.TestCase):
         ])
         self.assertEqual(args.host, "cursor")
 
+    def test_cli_accepts_chatgpt_host(self):
+        args = build_parser().parse_args([
+            "mcp", "serve", "--host", "chatgpt", "--control-root", "control", "--index-root", "index", "--runtime-root", "runtime",
+        ])
+        self.assertEqual(args.host, "chatgpt")
+
     def test_codex_capability_requires_enabled_stdio_registration(self):
         with mock.patch("tsuzu.claude_adapter.shutil.which", return_value="/usr/local/bin/codex"), mock.patch("tsuzu.claude_adapter.subprocess.run", side_effect=(
             CompletedProcess(("codex", "--version"), 0, "codex-cli 0.144.1\n", ""),

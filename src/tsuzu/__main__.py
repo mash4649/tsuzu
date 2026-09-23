@@ -5,6 +5,7 @@ import sys
 
 from .capability import CapabilityRegistry
 from .claude_adapter import ClaudeHostAdapter, ClaudeMcpServer, serve_stdio, verify_claude_capability, verify_codex_capability, verify_cursor_capability
+from .clip_digest import AppleNotesClipBridge, ClipDigestAdapter
 from .context import ContextBundleBuilder
 from .desktop_ingress import DesktopDraftIngress
 from .historical_import import AppleNotesAdapter, HistoricalImporter
@@ -19,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     mcp = subparsers.add_parser("mcp")
     mcp_subparsers = mcp.add_subparsers(dest="mcp_command", required=True)
     serve = mcp_subparsers.add_parser("serve")
-    serve.add_argument("--host", choices=("claude-code", "codex", "cursor"), required=True)
+    serve.add_argument("--host", choices=("claude-code", "codex", "cursor", "chatgpt"), required=True)
     serve.add_argument("--control-root", required=True)
     serve.add_argument("--index-root", required=True)
     serve.add_argument("--runtime-root", required=True)
@@ -44,6 +45,9 @@ def main() -> None:
             print("ACTION_REQUIRED", file=sys.stderr)
             raise SystemExit(2)
         print(result.import_session_id, result.committed_count, result.already_imported_count, result.blocked_count, result.failed_count)
+        return
+    if args.command == "mcp" and args.host == "chatgpt":
+        serve_stdio(ClaudeMcpServer(ClipDigestAdapter(AppleNotesClipBridge(), locator)))
         return
     index = IndexManager(args.index_root, locator)
     index.open()

@@ -44,3 +44,18 @@ PYTHONPATH=src python3 -m tsuzu apple-notes-import --queue-root /absolute/core/r
 ```
 
 The receipt summary is body-free. The Canonical Source retains the note title, observed modification time, and a hashed `x-apple-notes://selected/...` locator; the raw Notes identifier is kept only in the body-free import identity hash. Re-run the command for a changed selected note; an identical snapshot is idempotent.
+
+## ChatGPT Clip digest (developer mode)
+
+The separate `chatgpt` MCP host implements the `clip-digest` flow without changing the read-only historical importer above. On an explicit ChatGPT request it lists unprocessed links in Apple Notes `📥Clip`, lets ChatGPT inspect each linked public page through the bounded R1 fetcher, then writes a distilled draft to `<active-vault>/wiki/_inbox`. Only the Note title and link (not the Note body) and fetched public page text are returned to ChatGPT; known credential patterns are withheld. Drafts are not promoted to `wiki/cards`; low-value items can be marked processed without a card. A body-free local receipt prevents repeat work. Apple Notes itself is never edited, consistent with R3.
+
+Run the local stdio server with the same Core paths used by the other TSUZU hosts:
+
+```sh
+/absolute/path/to/tsuzu-main/bin/tsuzu-mcp mcp serve --host chatgpt \
+  --control-root /absolute/core/control \
+  --index-root /absolute/core/index \
+  --runtime-root /absolute/core/runtime
+```
+
+ChatGPT cannot connect directly to a local MCP process. For private use, connect this stdio command through OpenAI Secure MCP Tunnel and create a Developer Mode custom app in ChatGPT. That requires an OpenAI Platform tunnel, runtime API key, and workspace permissions; TSUZU does not create or store them. Full write-action support is currently plan-gated (Business/Enterprise/Edu beta); Pro connections are read/fetch only. Until the app and tunnel are configured and tested from ChatGPT, this is locally verified MCP functionality, not a completed ChatGPT end-to-end integration.
