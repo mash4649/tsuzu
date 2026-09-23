@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,9 @@ from tsuzu.desktop_ingress import DesktopDraftIngress, DesktopIngressStatus
 from tsuzu.index import IndexManager
 from tsuzu.source import create_source, parse_source
 from tsuzu.vault import ActiveVaultLocator
+
+
+SIDECAR = Path(__file__).parents[1] / "desktop" / "src-tauri" / "binaries" / "tsuzu-core-aarch64-apple-darwin"
 
 
 class CodexPromptHookTests(unittest.TestCase):
@@ -138,7 +142,7 @@ class CodexPromptHookTests(unittest.TestCase):
             (app_local / "capture-drafts" / "layout.json").write_text('{"format":"tsuzu-capture-draft-v1"}')
             (draft_root / "source.md").write_text("---\n" + json.dumps(manifest) + "\n---\n")
             (draft_root / "payload" / "original").write_text("Tauri からの記録")
-            ingress = DesktopDraftIngress(app_local, core_root / "queue", locator, index)
+            ingress = DesktopDraftIngress(app_local, core_root / "runtime" / "queue", locator, index)
             self.assertEqual(ingress.submit(draft_id).status, DesktopIngressStatus.QUEUED)
 
             result = hook.handle(self.event("Codex からの記録", turn="shared-turn"))
@@ -160,6 +164,59 @@ class CodexPromptHookTests(unittest.TestCase):
             other_event["cwd"] = str(other_project)
             self.assertEqual(other_hook.handle(other_event).capture_status, "IGNORED_RUNTIME")
             self.assertEqual(hook.source_count(), 3)
+        finally:
+            index.close()
+
+    @unittest.skipUnless(SIDECAR.is_file(), "build the Tauri sidecar to enable this integration check")
+    def test_packaged_sidecar_and_codex_hook_share_runtime_queue_and_vault(self):
+        core_root = Path(self.temp.name) / "shared-core"
+        vault_root = Path(self.temp.name) / "Vault"
+        hook = CodexPromptHook(
+            Path(self.temp.name) / "legacy",
+            self.project,
+            core_root=core_root,
+            vault_root=vault_root,
+        )
+        locator = ActiveVaultLocator(core_root / "control")
+        hook._locator()
+        app_local = Path(self.temp.name) / "app-local"
+        drafts = app_local / "capture-drafts"
+        draft_id = "00000000-0000-4000-8000-000000000001"
+        draft_root = drafts / "sources" / draft_id
+        (draft_root / "payload").mkdir(parents=True)
+        (drafts / "layout.json").write_text('{"format":"tsuzu-capture-draft-v1"}')
+        manifest = create_source(
+            "Tauri packaged sidecar record",
+            kind="TEXT",
+            capture_method="LOCAL_TEXT",
+            object_id=draft_id,
+            captured_at="2026-09-23T00:00:00.000Z",
+        )
+        (draft_root / "source.md").write_text("---\n" + json.dumps(manifest) + "\n---\n")
+        (draft_root / "payload" / "original").write_text("Tauri packaged sidecar record")
+        command = [
+            str(SIDECAR),
+            "--app-local-root", str(app_local),
+            "--core-root", str(core_root),
+            "--vault-root", str(vault_root),
+        ]
+
+        sidecar_run = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(sidecar_run.returncode, 0, sidecar_run.stderr)
+        tauri_receipt = next(record for record in json.loads(sidecar_run.stdout) if record["status"] == "COMMITTED")
+        codex_result = hook.handle(self.event("Codex shared queue record", turn="shared-queue"))
+        sidecar_replay = subprocess.run(command, capture_output=True, text=True, check=True)
+
+        self.assertEqual(tauri_receipt["status"], "COMMITTED")
+        self.assertEqual(codex_result.capture_status, "COMMITTED_LOCAL")
+        self.assertEqual(json.loads(sidecar_replay.stdout)[0]["status"], "ALREADY_COMMITTED")
+        self.assertEqual(hook.handle(self.event("Codex shared queue record", turn="shared-queue")).capture_status, "ALREADY_COMMITTED")
+        self.assertTrue((vault_root / "canonical" / "sources" / tauri_receipt["source_id"] / "source.md").is_file())
+        self.assertEqual(hook.source_count(), 2)
+        index = IndexManager(core_root / "index", locator)
+        index.open()
+        try:
+            self.assertEqual(len(index.search("record")), 2)
         finally:
             index.close()
 

@@ -72,9 +72,9 @@ class CodexPromptHook:
         self.root = Path(core_root).expanduser().resolve() if core_root is not None else self.data_root / hashlib.sha256(str(self.project_root).encode()).hexdigest()[:24]
         self.control_root = self.root / "control"
         self.vault_root = Path(vault_root or os.environ.get("TSUZU_VAULT_ROOT", self.root / "vault")).expanduser().resolve()
-        self.queue_root = self.root / "queue"
         self.index_root = self.root / "index"
         self.runtime_root = self.root / "runtime"
+        self.queue_root = self.runtime_root / "queue"
         self.trace_root = self.runtime_root / "context-traces"
         self.passive_trace_root = self.runtime_root / "passive-traces"
 
