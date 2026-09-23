@@ -7,11 +7,11 @@ import {
   writeFile,
   writeTextFile,
 } from "@tauri-apps/plugin-fs";
-import type { CanonicalStorage } from "../../application/canonicalSourceStore";
+import type { CaptureDraftStorage } from "../../application/canonicalSourceStore";
 
 const options = { baseDir: BaseDirectory.AppLocalData } as const;
 
-export const canonicalStorage: CanonicalStorage = {
+export const captureDraftStorage: CaptureDraftStorage = {
   exists: (path) => exists(path, options),
   mkdir: (path) => mkdir(path, { ...options, recursive: true }),
   readText: (path) => readTextFile(path, options),

@@ -21,6 +21,14 @@ The implementation starts with the Python standard library and SQLite. Contract-
 
 See [ADR-001](docs/decisions/ADR-001-python-stdlib-sqlite.md) for the implementation baseline decision.
 
+## Canonical ownership
+
+Mac TSUZU Core is the sole mutable Canonical writer. In the current baseline,
+that means Python `AtomicSourceWriter`/`SingleWriterWorker` owns the active
+Vault; Codex is an adapter over it. The Tauri shell's local text capture is a
+non-Canonical draft until a Core ingress adapter is implemented. It must not
+be treated as recallable TSUZU memory.
+
 ## Codex automatic memory and proposal
 
 `.codex/hooks.json` registers a `UserPromptSubmit` hook. After you review and trust that hook in Codex, each clean user prompt is stored only in the local per-project Vault. A later decision prompt may receive up to three prior, policy-approved `UNTRUSTED_DATA` excerpts with a body-free trace; secrets, SENSITIVE, and RESTRICTED content are never injected.

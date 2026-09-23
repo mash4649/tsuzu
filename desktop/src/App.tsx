@@ -21,10 +21,10 @@ function App({
   }
 
   async function handleCapture() {
-    setCaptureStatus("保存中…");
+    setCaptureStatus("下書き保存中…");
     try {
       const captured = await captureTextSource(sourceText);
-      setCaptureStatus(`保存・再読込・検証済み: ${captured.objectId}`);
+      setCaptureStatus(`下書き保存・再読込・検証済み: ${captured.objectId}`);
       setSourceText("");
     } catch (error) {
       setCaptureStatus(
@@ -46,8 +46,9 @@ function App({
       </button>
       <p aria-live="polite">{runtimeStatusLabel(runtimeStatus)}</p>
       <section aria-labelledby="capture-title">
-        <h2 id="capture-title">Canonical SOURCE</h2>
-        <label htmlFor="source-text">ローカルテキスト</label>
+        <h2 id="capture-title">Capture draft</h2>
+        <p>これはMac TSUZU CoreのCanonicalではありません。Core接続までのローカル下書きです。</p>
+        <label htmlFor="source-text">保存するテキスト</label>
         <textarea
           id="source-text"
           value={sourceText}
@@ -55,7 +56,7 @@ function App({
           rows={4}
         />
         <button type="button" onClick={handleCapture}>
-          保存して再検証
+          下書きを保存して再検証
         </button>
         <p aria-live="polite">{captureStatus}</p>
       </section>

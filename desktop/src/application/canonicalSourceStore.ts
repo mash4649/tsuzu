@@ -6,11 +6,11 @@ import {
   type SourceManifest,
 } from "../domain/source";
 
-const canonicalRoot = "canonical";
-const layoutMarkerPath = `${canonicalRoot}/layout.json`;
-const layoutMarker = JSON.stringify({ format: "tsuzu-canonical-source-v1" });
+const draftRoot = "capture-drafts";
+const layoutMarkerPath = `${draftRoot}/layout.json`;
+const layoutMarker = JSON.stringify({ format: "tsuzu-capture-draft-v1" });
 
-export interface CanonicalStorage {
+export interface CaptureDraftStorage {
   exists(path: string): Promise<boolean>;
   mkdir(path: string): Promise<void>;
   readText(path: string): Promise<string>;
@@ -19,32 +19,32 @@ export interface CanonicalStorage {
   writeBytes(path: string, contents: Uint8Array): Promise<void>;
 }
 
-export class ExistingCanonicalLayoutError extends Error {
+export class ExistingCaptureDraftLayoutError extends Error {
   constructor() {
-    super("Existing Canonical layout was not initialized by this app; refusing to modify it");
+    super("Existing capture-draft layout was not initialized by this app; refusing to modify it");
   }
 }
 
-export type CanonicalSourceStore = Readonly<{
+export type CaptureDraftStore = Readonly<{
   captureText(text: string): Promise<{ objectId: string }>;
   read(objectId: string): Promise<{ manifest: SourceManifest; payload: Uint8Array }>;
 }>;
 
-export async function createCanonicalSourceStore(
-  storage: CanonicalStorage,
+export async function createCaptureDraftStore(
+  storage: CaptureDraftStorage,
   dependencies: { createId?: () => string; now?: () => string } = {},
-): Promise<CanonicalSourceStore> {
+): Promise<CaptureDraftStore> {
   const createId = dependencies.createId ?? (() => crypto.randomUUID());
   const now = dependencies.now ?? (() => new Date().toISOString());
 
-  if (!(await storage.exists(canonicalRoot))) {
-    await storage.mkdir(canonicalRoot);
-    await storage.mkdir(`${canonicalRoot}/sources`);
+  if (!(await storage.exists(draftRoot))) {
+    await storage.mkdir(draftRoot);
+    await storage.mkdir(`${draftRoot}/sources`);
     await storage.writeText(layoutMarkerPath, layoutMarker);
   } else if (!(await storage.exists(layoutMarkerPath))) {
-    throw new ExistingCanonicalLayoutError();
+    throw new ExistingCaptureDraftLayoutError();
   } else if ((await storage.readText(layoutMarkerPath)) !== layoutMarker) {
-    throw new ExistingCanonicalLayoutError();
+    throw new ExistingCaptureDraftLayoutError();
   }
 
   return {
@@ -53,7 +53,7 @@ export async function createCanonicalSourceStore(
         objectId: createId(),
         capturedAt: now(),
       });
-      const sourceRoot = `${canonicalRoot}/sources/${manifest.object_id}`;
+      const sourceRoot = `${draftRoot}/sources/${manifest.object_id}`;
       if (await storage.exists(sourceRoot)) {
         throw new Error("SOURCE identifier collision");
       }
@@ -64,7 +64,7 @@ export async function createCanonicalSourceStore(
       return { objectId: manifest.object_id };
     },
     async read(objectId: string) {
-      const sourceRoot = `${canonicalRoot}/sources/${objectId}`;
+      const sourceRoot = `${draftRoot}/sources/${objectId}`;
       const manifest = parseSourceManifest(await storage.readText(`${sourceRoot}/source.md`));
       if (manifest.object_id !== objectId) {
         throw new Error("SOURCE identifier does not match its path");

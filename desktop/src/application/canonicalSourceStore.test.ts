@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
-  ExistingCanonicalLayoutError,
-  createCanonicalSourceStore,
-  type CanonicalStorage,
+  ExistingCaptureDraftLayoutError,
+  createCaptureDraftStore,
+  type CaptureDraftStorage,
 } from "./canonicalSourceStore";
 
-class MemoryStorage implements CanonicalStorage {
+class MemoryStorage implements CaptureDraftStorage {
   readonly directories = new Set<string>();
   readonly textFiles = new Map<string, string>();
   readonly binaryFiles = new Map<string, Uint8Array>();
@@ -43,19 +43,19 @@ class MemoryStorage implements CanonicalStorage {
   }
 }
 
-describe("CanonicalSourceStore", () => {
+describe("CaptureDraftStore", () => {
   it("initializes only an empty app storage, then captures and validates a SOURCE after reopen", async () => {
     const storage = new MemoryStorage();
     const ids = ["00000000-0000-4000-8000-000000000001"];
     const now = "2026-09-14T00:00:00.000Z";
 
-    const firstRun = await createCanonicalSourceStore(storage, {
+    const firstRun = await createCaptureDraftStore(storage, {
       createId: () => ids.shift()!,
       now: () => now,
     });
     const captured = await firstRun.captureText("TSUZU の記録");
 
-    const reopened = await createCanonicalSourceStore(storage, {
+    const reopened = await createCaptureDraftStore(storage, {
       createId: () => "00000000-0000-4000-8000-000000000002",
       now: () => now,
     });
@@ -70,32 +70,32 @@ describe("CanonicalSourceStore", () => {
   });
 
   it("creates a SOURCE with the platform UUID generator by default", async () => {
-    const store = await createCanonicalSourceStore(new MemoryStorage());
+    const store = await createCaptureDraftStore(new MemoryStorage());
     await expect(store.captureText("default id")).resolves.toMatchObject({
       objectId: expect.stringMatching(/^[0-9a-f-]{36}$/),
     });
   });
 
-  it("stops without modifying a Canonical layout it did not initialize", async () => {
+  it("stops without modifying a capture-draft layout it did not initialize", async () => {
     const storage = new MemoryStorage();
-    storage.directories.add("canonical");
+    storage.directories.add("capture-drafts");
 
-    await expect(createCanonicalSourceStore(storage)).rejects.toBeInstanceOf(
-      ExistingCanonicalLayoutError,
+    await expect(createCaptureDraftStore(storage)).rejects.toBeInstanceOf(
+      ExistingCaptureDraftLayoutError,
     );
-    expect(storage.directories).toEqual(new Set(["canonical"]));
+    expect(storage.directories).toEqual(new Set(["capture-drafts"]));
     expect(storage.textFiles).toEqual(new Map());
   });
 
   it("rejects a SOURCE whose payload no longer matches its manifest", async () => {
     const storage = new MemoryStorage();
-    const store = await createCanonicalSourceStore(storage, {
+    const store = await createCaptureDraftStore(storage, {
       createId: () => "00000000-0000-4000-8000-000000000003",
       now: () => "2026-09-14T00:00:00.000Z",
     });
     const captured = await store.captureText("intact");
     await storage.writeBytes(
-      `canonical/sources/${captured.objectId}/payload/original`,
+      `capture-drafts/sources/${captured.objectId}/payload/original`,
       new TextEncoder().encode("tampered"),
     );
 
