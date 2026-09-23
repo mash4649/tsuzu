@@ -5,12 +5,41 @@ from dataclasses import replace
 from pathlib import Path
 
 from tsuzu.canonical import CanonicalStore, ObjectRegistration, ObjectRegistry, _parse_manifest
+from tsuzu.chronicle import CodexHookChronicleCapture
 from tsuzu.derived import DerivedJobQueue, DerivedJobRequest, DerivedStatus
-from tsuzu.episode import EpisodeDraft, EpisodeMessage, complete_episode_job, persist_episode, segment_messages, validate_episode
+from tsuzu.episode import EpisodeDraft, EpisodeMessage, build_episode_inputs, complete_episode_job, persist_episode, segment_messages, validate_episode
 from tsuzu.vault import ActiveVaultLocator
 
 
 class EpisodeTests(unittest.TestCase):
+    def test_codex_chronicle_inputs_rebuild_episode_messages_and_refs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            vault = root / "vault"
+            vault.mkdir()
+            locator = ActiveVaultLocator(root / "control")
+            locator.initialize(vault, operation_id="init")
+            capture = CodexHookChronicleCapture(locator, "/work/allowed")
+            user = capture.capture({
+                "hook_event_name": "UserPromptSubmit", "cwd": "/work/allowed", "session_id": "codex-session",
+                "turn_id": "turn-1", "prompt": "Use SQLite?",
+            })
+            assistant = capture.capture({
+                "hook_event_name": "Stop", "cwd": "/work/allowed", "session_id": "codex-session",
+                "turn_id": "turn-1", "last_assistant_message": "SQLite fits here.", "stop_hook_active": False,
+            })
+            conversation_ref = capture.inspect_message(user.messages[0].object_id)["conversation_id"]
+
+            messages, refs = build_episode_inputs(locator, conversation_ref)
+            episodes = segment_messages(messages, "b2-rules-v1")
+
+            self.assertEqual([(item.actor, item.text) for item in messages], [("USER", "Use SQLite?"), ("ASSISTANT", "SQLite fits here.")])
+            self.assertEqual({item[1] for item in refs}, {user.messages[0].object_id, assistant.messages[0].object_id})
+            self.assertEqual([item.sequence for item in messages], [0, 1])
+            self.assertTrue(all(item.observed_at.endswith("Z") for item in messages))
+            self.assertEqual(len(episodes), 1)
+            self.assertEqual(episodes[0].message_refs, ((user.messages[0].object_id, "USER"), (assistant.messages[0].object_id, "ASSISTANT")))
+
     def test_episode_job_requires_c4_preflight_then_settles_with_derived_output(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

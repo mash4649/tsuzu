@@ -8,8 +8,9 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from .canonical import CanonicalStore, CommitResult, CreateCanonicalIntent, ObjectRegistration
+from .canonical import CanonicalStore, CommitResult, CreateCanonicalIntent, ObjectRegistration, ObjectRegistry, _parse_manifest
 from .derived import DerivedJobQueue, DerivedJobRequest, DerivedJobResult, DerivedStatus
+from .vault import ActiveVaultLocator
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,56 @@ class EpisodeMessage:
     observed_at: str
     content_state: str
     text: str | None
+    sequence: int = 0
+
+
+def build_episode_inputs(locator: ActiveVaultLocator, conversation_ref: str) -> tuple[tuple[EpisodeMessage, ...], tuple[tuple[str, str, int, str], ...]]:
+    """Re-read one Canonical conversation; C1 created_at supplies receipt time when the host has none."""
+    if not _uuid(conversation_ref):
+        raise ValueError("invalid conversation reference")
+    registry = ObjectRegistry()
+    registry.register(ObjectRegistration("CONVERSATION_MESSAGE", "CANONICAL", "IMMUTABLE", "OPTIONAL_PAYLOAD", "B2"))
+    store = CanonicalStore(locator, registry)
+    root = locator.resolve_active_vault().root_ref / "canonical" / "objects" / "CONVERSATION_MESSAGE"
+    if root.is_symlink():
+        raise ValueError("Chronicle message root is a symlink")
+    if not root.exists():
+        return (), ()
+    messages: list[EpisodeMessage] = []
+    refs: list[tuple[str, str, int, str]] = []
+    for path in sorted(root.iterdir()):
+        if path.is_symlink() or not path.is_dir():
+            raise ValueError("invalid Chronicle message entry")
+        inspected = store.inspect_canonical("CONVERSATION_MESSAGE", path.name)
+        if inspected.status != "VALID" or inspected.path is None or inspected.revision is None:
+            raise ValueError("Chronicle message is unavailable or corrupt")
+        document = (inspected.path / "object.md").read_bytes()
+        manifest = _parse_manifest(document.decode("utf-8"))
+        if manifest.get("conversation_id") != conversation_ref:
+            continue
+        actor = manifest.get("actor")
+        sequence = manifest.get("sequence")
+        content_state = manifest.get("content_state")
+        if actor not in {"USER", "ASSISTANT", "TOOL", "SYSTEM_OBSERVED"} or isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+            raise ValueError("invalid Chronicle actor or order")
+        if content_state == "AVAILABLE":
+            payload = inspected.path / "payload" / "original"
+            if payload.is_symlink() or not payload.is_file():
+                raise ValueError("available Chronicle body is missing")
+            try:
+                text = payload.read_bytes().decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError("Chronicle body is not UTF-8") from exc
+        elif content_state == "EXCLUDED_RESTRICTED":
+            text = None
+        else:
+            raise ValueError("invalid Chronicle content state")
+        observed_at = manifest.get("observed_at") or manifest.get("created_at")
+        _time(observed_at)
+        messages.append(EpisodeMessage(conversation_ref, path.name, actor, observed_at, content_state, text, sequence))
+        refs.append(("CONVERSATION_MESSAGE", path.name, inspected.revision, hashlib.sha256(document).hexdigest()))
+    messages.sort(key=lambda item: (_time(item.observed_at), item.sequence, item.message_id))
+    return tuple(messages), tuple(sorted(refs))
 
 
 def segment_messages(messages: tuple[EpisodeMessage, ...], algorithm_version: str) -> tuple[EpisodeDraft, ...]:
