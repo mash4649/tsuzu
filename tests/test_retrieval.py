@@ -51,6 +51,16 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual(result.approved[0].destination_id, "codex")
         self.assertEqual(result.approved[0].destination_class, "TRUSTED_EXTERNAL")
 
+    def test_cursor_personal_recall_uses_the_same_external_egress_policy(self):
+        source_id = "24222222-2222-4222-8222-222222222222"
+        self.capture(source_id, "Cursor explicit recall fixture")
+
+        result = RetrievalService(self.index).retrieve(self.request("explicit recall", "cursor"))
+
+        self.assertEqual(result.status, "OK")
+        self.assertEqual(result.approved[0].destination_id, "cursor")
+        self.assertEqual(result.approved[0].destination_class, "TRUSTED_EXTERNAL")
+
     def test_sensitive_external_and_unknown_destination_are_denied(self):
         source_id = "33333333-3333-4333-8333-333333333333"
         self.capture(source_id, "機密の予算資料", "SENSITIVE")
@@ -60,6 +70,9 @@ class RetrievalTests(unittest.TestCase):
         codex = RetrievalService(self.index).retrieve(self.request("予算資料", "codex"))
         self.assertEqual(codex.status, "NO_ELIGIBLE_CONTEXT")
         self.assertIn((source_id, "DENY_SENSITIVE_EXTERNAL"), codex.decisions)
+        cursor = RetrievalService(self.index).retrieve(self.request("予算資料", "cursor"))
+        self.assertEqual(cursor.status, "NO_ELIGIBLE_CONTEXT")
+        self.assertIn((source_id, "DENY_SENSITIVE_EXTERNAL"), cursor.decisions)
         local = RetrievalService(self.index).retrieve(self.request("予算資料", "local_test"))
         self.assertEqual(local.status, "OK")
         unknown = RetrievalService(self.index).retrieve(self.request("予算資料", "spoofed_local"))

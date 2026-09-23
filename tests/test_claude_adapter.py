@@ -7,7 +7,7 @@ from subprocess import CompletedProcess
 from unittest import mock
 
 from tsuzu.capability import Capability, CapabilityRegistry, CapabilityReport, EXPLICIT_RECALL, VERIFIED
-from tsuzu.claude_adapter import ClaudeHostAdapter, ClaudeMcpServer, McpInputError, McpUnavailableError, _version_at_least, serve_stdio, verify_codex_capability
+from tsuzu.claude_adapter import ClaudeHostAdapter, ClaudeMcpServer, McpInputError, McpUnavailableError, _version_at_least, serve_stdio, verify_codex_capability, verify_cursor_capability
 from tsuzu.context import ContextBundleBuilder
 from tsuzu.index import IndexManager
 from tsuzu.retrieval import RetrievalService
@@ -106,6 +106,27 @@ class ClaudeHostAdapterTests(unittest.TestCase):
         with self.assertRaises(McpInputError):
             adapter.recall({"query": "trace parity", "scope": "PROJECT"})
 
+    def test_cursor_host_uses_the_common_adapter_without_scope_widening(self):
+        registry = CapabilityRegistry()
+        registry.publish(CapabilityReport("cursor", "CURSOR", "3.21.9", "2026-09-23T00:00:00Z", "test", (Capability(EXPLICIT_RECALL, VERIFIED, ("GLOBAL",)),), "TRUSTED_EXTERNAL"))
+        adapter = ClaudeHostAdapter(
+            RetrievalService(self.index),
+            ContextBundleBuilder(self.locator, Path(self.temp.name) / "runtime-cursor"),
+            registry,
+            adapter_id="cursor",
+        )
+        source_id = "56555555-5555-4555-8555-555555555555"
+        self.writer.create_source("Cursor trace parity fixture", kind="TEXT", capture_method="LOCAL_TEXT", object_id=source_id)
+        self.index.upsert_source(source_id)
+
+        response = adapter.recall({"query": "trace parity"})["structuredContent"]
+
+        self.assertEqual(response["status"], "OK")
+        self.assertEqual(response["items"][0]["sourceId"], source_id)
+        self.assertEqual(response["items"][0]["contentRole"], "UNTRUSTED_DATA")
+        with self.assertRaises(McpInputError):
+            adapter.recall({"query": "trace parity", "scope": "PROJECT"})
+
     def test_stdio_protocol_discovers_one_tool_and_rejects_invalid_args(self):
         server = ClaudeMcpServer(self.adapter)
         inbound = io.StringIO(
@@ -126,6 +147,12 @@ class ClaudeHostAdapterTests(unittest.TestCase):
         ])
         self.assertEqual(args.host, "codex")
 
+    def test_cli_accepts_cursor_host(self):
+        args = build_parser().parse_args([
+            "mcp", "serve", "--host", "cursor", "--control-root", "control", "--index-root", "index", "--runtime-root", "runtime",
+        ])
+        self.assertEqual(args.host, "cursor")
+
     def test_codex_capability_requires_enabled_stdio_registration(self):
         with mock.patch("tsuzu.claude_adapter.shutil.which", return_value="/usr/local/bin/codex"), mock.patch("tsuzu.claude_adapter.subprocess.run", side_effect=(
             CompletedProcess(("codex", "--version"), 0, "codex-cli 0.144.1\n", ""),
@@ -137,6 +164,17 @@ class ClaudeHostAdapterTests(unittest.TestCase):
             CompletedProcess(("codex", "mcp", "get", "tsuzu"), 1, "", "not found"),
         )):
             self.assertNotEqual(verify_codex_capability().capabilities[0].state, VERIFIED)
+
+    def test_cursor_capability_requires_stdio_registration(self):
+        config = Path(self.temp.name) / "mcp.json"
+        config.write_text(json.dumps({"mcpServers": {"tsuzu": {"command": "bin/tsuzu-mcp", "args": ["--host", "cursor"]}}}))
+        with mock.patch("tsuzu.claude_adapter.shutil.which", return_value="/usr/local/bin/cursor"), mock.patch("tsuzu.claude_adapter.subprocess.run", return_value=CompletedProcess(("cursor", "--version"), 0, "3.21.9\ncommit\narm64\n", "")):
+            report = verify_cursor_capability(config)
+            self.assertEqual(report.adapter_version, "3.21.9")
+            self.assertEqual(report.capabilities[0].state, VERIFIED)
+        config.write_text(json.dumps({"mcpServers": {"tsuzu": {"command": "bin/tsuzu-mcp", "args": ["--host", "codex"]}}}))
+        with mock.patch("tsuzu.claude_adapter.shutil.which", return_value="/usr/local/bin/cursor"), mock.patch("tsuzu.claude_adapter.subprocess.run", return_value=CompletedProcess(("cursor", "--version"), 0, "3.21.9\ncommit\narm64\n", "")):
+            self.assertNotEqual(verify_cursor_capability(config).capabilities[0].state, VERIFIED)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, TextIO
 
 from .capability import Capability, CapabilityRegistry, CapabilityReport, EXPLICIT_RECALL, UNVERIFIED, VERIFIED
@@ -203,6 +204,36 @@ def verify_codex_capability() -> CapabilityReport:
         (Capability(EXPLICIT_RECALL, state, ("GLOBAL",), ("approval_mode=prompt",)),),
         "TRUSTED_EXTERNAL",
     )
+
+
+def verify_cursor_capability(config_path: Path | None = None) -> CapabilityReport:
+    version = "unavailable"
+    registration: object = None
+    if shutil.which("cursor"):
+        try:
+            first_line = subprocess.run(["cursor", "--version"], capture_output=True, text=True, timeout=5, check=False).stdout.strip().splitlines()[0]
+            version = first_line.removeprefix("Cursor ")
+        except (OSError, subprocess.SubprocessError, IndexError):
+            pass
+    try:
+        config = json.loads((config_path or Path.home() / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
+        registration = config.get("mcpServers", {}).get("tsuzu") if isinstance(config, dict) else None
+    except (OSError, ValueError):
+        pass
+    state = VERIFIED if version != "unavailable" and _cursor_stdio_registration(registration) else UNVERIFIED
+    return CapabilityReport(
+        "cursor", "CURSOR", version, _now(),
+        "cursor --version; ~/.cursor/mcp.json tsuzu stdio registration",
+        (Capability(EXPLICIT_RECALL, state, ("GLOBAL",), ("MCP approval required",)),),
+        "TRUSTED_EXTERNAL",
+    )
+
+
+def _cursor_stdio_registration(registration: object) -> bool:
+    if not isinstance(registration, dict) or not isinstance(registration.get("command"), str):
+        return False
+    args = registration.get("args")
+    return isinstance(args, list) and all(isinstance(arg, str) for arg in args) and "--host" in args and "cursor" in args
 
 
 def _validate_arguments(arguments: object) -> tuple[str, int]:

@@ -40,6 +40,7 @@ class DestinationRegistry:
             Destination("local_test", DESTINATION_LOCAL, frozenset({CAPABILITY})),
             Destination("claude_code", DESTINATION_TRUSTED_EXTERNAL, frozenset({CAPABILITY})),
             Destination("codex", DESTINATION_TRUSTED_EXTERNAL, frozenset({CAPABILITY})),
+            Destination("cursor", DESTINATION_TRUSTED_EXTERNAL, frozenset({CAPABILITY})),
         )}
 
     def resolve(self, destination_id: str) -> Destination | None:
