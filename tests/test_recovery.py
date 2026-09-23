@@ -65,6 +65,31 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(rebuilt.search("recoverable"), [])
         rebuilt.close()
 
+    def test_paired_device_keys_are_included_in_backup_and_restore(self):
+        system = self.locator.resolve_active_vault().root_ref / "system"
+        registry = system / "paired-device-keys" / "registry.json"
+        registry.parent.mkdir(parents=True)
+        registry.write_text('{"keys":{"ed25519:test":{"public_key_pem":"public-only","revoked_at":null}},"schema_version":"1.0.0"}\n')
+        event_receipt = system / "ios-share-event-receipts" / "11111111-1111-4111-8111-111111111111.json"
+        event_receipt.parent.mkdir()
+        event_receipt.write_text('{"envelope_sha256":"abc","mobile_capture_id":"11111111-1111-4111-8111-111111111111"}\n')
+        backup = self.recovery.create_backup(backup_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+        self.assertEqual(backup.status, "COMMITTED")
+        self.assertTrue((backup.path / "protected/system/paired-device-keys/registry.json").is_file())
+        self.assertTrue((backup.path / "protected/system/ios-share-event-receipts/11111111-1111-4111-8111-111111111111.json").is_file())
+
+        self.index.close()
+        restored = self.recovery.restore(backup.backup_id, Path(self.temp.name) / "restored-paired")
+
+        self.assertEqual(restored.status, "RESTORED")
+        active_registry = self.locator.resolve_active_vault().root_ref / "system" / "paired-device-keys" / "registry.json"
+        self.assertEqual(active_registry.read_text(), registry.read_text())
+        active_event_receipt = self.locator.resolve_active_vault().root_ref / "system" / "ios-share-event-receipts" / event_receipt.name
+        self.assertEqual(active_event_receipt.read_text(), event_receipt.read_text())
+        rebuilt = IndexManager(self.index_root, self.locator)
+        rebuilt.open()
+        rebuilt.close()
+
     def test_interrupted_backup_has_no_restorable_snapshot(self):
         fail_once = {"pending": True}
 

@@ -8,8 +8,11 @@ import os
 import re
 import shutil
 import stat
+import subprocess
+import tempfile
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
@@ -26,6 +29,11 @@ class TransportStatus:
     TRANSPORT_AUTHENTICITY_FAILED = "TRANSPORT_AUTHENTICITY_FAILED"
     MAC_COMMITTED = "MAC_COMMITTED"
     MAC_ACCEPTED = "MAC_ACCEPTED"
+
+
+_MAX_ENVELOPE_AGE = timedelta(days=30)
+_MAX_CLOCK_SKEW = timedelta(minutes=5)
+_SIGNATURE_ALGORITHM = "Ed25519"
 
 
 @dataclass(frozen=True)
@@ -64,7 +72,7 @@ class MobileOutbox:
             _validate_uuid(request.idempotency_key)
             _validate_timestamp(request.created_at)
             kind = request.kind.upper()
-            if kind not in {"TEXT", "URL", "FILE"} or not request.device_key_id or not request.signature_algorithm:
+            if kind not in {"TEXT", "URL", "FILE"} or not request.device_key_id or request.signature_algorithm != _SIGNATURE_ALGORITHM:
                 raise ValueError("invalid mobile envelope")
             final = self.root / "pending" / request.mobile_capture_id
             if final.exists() and not final.is_symlink():
@@ -92,7 +100,10 @@ class MobileOutbox:
                 "authenticity": {"device_key_id": request.device_key_id, "signature_algorithm": request.signature_algorithm},
                 "transport": {"state": TransportStatus.LOCAL_PENDING},
             }
-            envelope["authenticity"]["envelope_signature"] = self.signer(_signed_bytes(envelope))
+            signature = self.signer(_signed_bytes(envelope))
+            if not isinstance(signature, str) or not re.fullmatch(r"[0-9a-f]{128}", signature):
+                raise ValueError("signer must return a 64-byte Ed25519 signature as lowercase hex")
+            envelope["authenticity"]["envelope_signature"] = signature
             self._write_json(staging / "envelope.json", envelope)
             os.rename(staging, final)
             _fsync_directory(final.parent)
@@ -165,7 +176,7 @@ class MobileOutbox:
 
 
 class MacInboxConsumer:
-    def __init__(self, queue_root: str | os.PathLike[str], locator: ActiveVaultLocator, *, verifier: Callable[[str, str, bytes, str], bool]):
+    def __init__(self, queue_root: str | os.PathLike[str], locator: ActiveVaultLocator, *, verifier: Callable[[str, str, bytes, str], bool] | None = None):
         self.queue_root = Path(queue_root)
         self.locator = locator
         self.verifier = verifier
@@ -184,8 +195,10 @@ class MacInboxConsumer:
             if len(payload) != envelope["payload"]["bytes"] or hashlib.sha256(payload).hexdigest() != envelope["payload"]["sha256"]:
                 raise ValueError("transport payload integrity mismatch")
             auth = envelope["authenticity"]
-            if not self.verifier(auth["device_key_id"], auth["signature_algorithm"], _signed_bytes(envelope), auth["envelope_signature"]):
+            verifier = self.verifier or PairedKeyRegistry(self.locator.resolve_active_vault().root_ref / "system" / "paired-device-keys").verify
+            if not verifier(auth["device_key_id"], auth["signature_algorithm"], _signed_bytes(envelope), auth["envelope_signature"]):
                 raise ValueError("unpaired or invalid transport signature")
+            _reserve_mobile_event(self.locator.resolve_active_vault().root_ref / "system" / "ios-share-event-receipts", envelope)
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             return TransportResult(TransportStatus.TRANSPORT_AUTHENTICITY_FAILED, reason=str(exc))
         input_data = envelope["input"]
@@ -224,6 +237,10 @@ def _validate_envelope(value: object) -> None:
     _validate_uuid(value["mobile_capture_id"])
     _validate_uuid(value["idempotency_key"])
     _validate_timestamp(value["created_at"])
+    created_at = datetime.fromisoformat(value["created_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
+    now = datetime.now(timezone.utc)
+    if created_at > now + _MAX_CLOCK_SKEW or created_at < now - _MAX_ENVELOPE_AGE:
+        raise ValueError("transport envelope expired or from the future")
     input_data, payload, plan, auth, transport = value["input"], value["payload"], value["source_plan"], value["authenticity"], value["transport"]
     if not isinstance(input_data, dict) or set(input_data) != {"kind", "original_name", "media_type"} or input_data["kind"] not in {"TEXT", "URL", "FILE"} or input_data["media_type"] != _media_type(input_data["kind"]) or (input_data["original_name"] is not None and not isinstance(input_data["original_name"], str)):
         raise ValueError("invalid transport input")
@@ -231,7 +248,7 @@ def _validate_envelope(value: object) -> None:
         raise ValueError("invalid transport payload")
     if plan != {"capture_method": f"IOS_SHARE_{input_data['kind']}", "requested_scope": "GLOBAL", "sensitivity_hint": "PERSONAL"}:
         raise ValueError("invalid transport source plan")
-    if not isinstance(auth, dict) or set(auth) != {"device_key_id", "signature_algorithm", "envelope_signature"} or not all(isinstance(auth[key], str) and auth[key] for key in auth):
+    if not isinstance(auth, dict) or set(auth) != {"device_key_id", "signature_algorithm", "envelope_signature"} or not all(isinstance(auth[key], str) and auth[key] for key in auth) or auth["signature_algorithm"] != _SIGNATURE_ALGORITHM or not re.fullmatch(r"[0-9a-f]{128}", auth["envelope_signature"]):
         raise ValueError("invalid transport authenticity")
     if transport != {"state": TransportStatus.LOCAL_PENDING}:
         raise ValueError("invalid transport state")
@@ -244,3 +261,137 @@ def _media_type(kind: str) -> str:
 def _valid_url(raw: bytes) -> bool:
     parsed = urlparse(raw.decode("utf-8"))
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+class PairedKeyRegistry:
+    """Vault-local public-key trust registry; private signing material never enters Core."""
+
+    def __init__(self, root: str | os.PathLike[str]):
+        self.root = Path(root)
+        self.path = self.root / "registry.json"
+
+    def register(self, public_key_pem: bytes) -> str:
+        der = _validate_ed25519_public_key(public_key_pem)
+        key_id = "ed25519:" + hashlib.sha256(der).hexdigest()
+        registry = self._read()
+        existing = registry["keys"].get(key_id)
+        if existing and existing["public_key_pem"] != public_key_pem.decode("ascii"):
+            raise ValueError("paired key id collision")
+        if existing and existing["revoked_at"] is not None:
+            raise ValueError("revoked key cannot be reactivated")
+        registry["keys"][key_id] = {"public_key_pem": public_key_pem.decode("ascii"), "revoked_at": None}
+        self._write(registry)
+        return key_id
+
+    def revoke(self, key_id: str) -> bool:
+        registry = self._read()
+        entry = registry["keys"].get(key_id)
+        if entry is None or entry["revoked_at"] is not None:
+            return False
+        entry["revoked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        self._write(registry)
+        return True
+
+    def verify(self, key_id: str, algorithm: str, message: bytes, signature: str) -> bool:
+        if algorithm != _SIGNATURE_ALGORITHM or not re.fullmatch(r"ed25519:[0-9a-f]{64}", key_id) or not re.fullmatch(r"[0-9a-f]{128}", signature):
+            return False
+        try:
+            entry = self._read()["keys"].get(key_id)
+            if entry is None or entry["revoked_at"] is not None:
+                return False
+            der = _validate_ed25519_public_key(entry["public_key_pem"].encode("ascii"))
+            if "ed25519:" + hashlib.sha256(der).hexdigest() != key_id:
+                return False
+            with tempfile.TemporaryDirectory(prefix="tsuzu-r4-") as tmp:
+                root = Path(tmp)
+                (root / "public.pem").write_bytes(entry["public_key_pem"].encode("ascii"))
+                (root / "message").write_bytes(message)
+                (root / "signature").write_bytes(bytes.fromhex(signature))
+                result = subprocess.run(
+                    [_openssl_path(), "pkeyutl", "-verify", "-pubin", "-inkey", str(root / "public.pem"), "-sigfile", str(root / "signature"), "-rawin", "-in", str(root / "message")],
+                    capture_output=True, timeout=5, check=False,
+                )
+                return result.returncode == 0
+        except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+            return False
+
+    def _read(self) -> dict[str, object]:
+        if not self.path.exists():
+            return {"schema_version": "1.0.0", "keys": {}}
+        if self.root.is_symlink() or self.root.parent.is_symlink() or self.path.is_symlink():
+            raise ValueError("paired-key registry path is symlink")
+        value = json.loads(self.path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict) or set(value) != {"schema_version", "keys"} or value["schema_version"] != "1.0.0" or not isinstance(value["keys"], dict):
+            raise ValueError("invalid paired-key registry")
+        for key_id, entry in value["keys"].items():
+            if not isinstance(key_id, str) or not isinstance(entry, dict) or set(entry) != {"public_key_pem", "revoked_at"} or not isinstance(entry["public_key_pem"], str) or (entry["revoked_at"] is not None and not isinstance(entry["revoked_at"], str)):
+                raise ValueError("invalid paired-key entry")
+        return value
+
+    def _write(self, value: dict[str, object]) -> None:
+        if self.root.is_symlink() or self.root.parent.is_symlink():
+            raise ValueError("paired-key registry path is symlink")
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = self.root / f".registry-{uuid.uuid4()}.tmp"
+        try:
+            with temporary.open("x", encoding="utf-8") as stream:
+                os.chmod(temporary, 0o600)
+                json.dump(value, stream, sort_keys=True, separators=(",", ":"))
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+            _fsync_directory(self.root)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def _openssl_path() -> str:
+    path = shutil.which("openssl")
+    if not path:
+        raise FileNotFoundError("OpenSSL executable is required for Ed25519 verification")
+    return path
+
+
+def _validate_ed25519_public_key(public_key_pem: bytes) -> bytes:
+    if not isinstance(public_key_pem, bytes) or len(public_key_pem) > 4096 or not public_key_pem.startswith(b"-----BEGIN PUBLIC KEY-----"):
+        raise ValueError("expected an Ed25519 SPKI public key in PEM format")
+    with tempfile.TemporaryDirectory(prefix="tsuzu-r4-key-") as tmp:
+        root = Path(tmp)
+        pem, der_path = root / "public.pem", root / "public.der"
+        pem.write_bytes(public_key_pem)
+        result = subprocess.run([_openssl_path(), "pkey", "-pubin", "-in", str(pem), "-outform", "DER", "-out", str(der_path)], capture_output=True, timeout=5, check=False)
+        if result.returncode != 0:
+            raise ValueError("invalid Ed25519 SPKI public key")
+        der = der_path.read_bytes()
+        if not der.startswith(bytes.fromhex("302a300506032b6570032100")):
+            raise ValueError("public key is not Ed25519 SPKI")
+        return der
+
+
+def _reserve_mobile_event(root: Path, envelope: dict[str, object]) -> None:
+    if root.is_symlink() or root.parent.is_symlink():
+        raise ValueError("mobile event receipt path is symlink")
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    event_id = envelope["mobile_capture_id"]
+    digest = hashlib.sha256(_signed_bytes(envelope)).hexdigest()
+    record = json.dumps({"mobile_capture_id": event_id, "envelope_sha256": digest}, sort_keys=True, separators=(",", ":")) + "\n"
+    path = root / f"{event_id}.json"
+    if path.is_symlink():
+        raise ValueError("mobile event receipt is symlink")
+    temporary = root / f".{event_id}-{uuid.uuid4()}.tmp"
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            os.chmod(temporary, 0o600)
+            stream.write(record)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.is_symlink() or not path.is_file() or path.read_text(encoding="utf-8") != record:
+                raise ValueError("mobile capture event id replay conflict")
+            return
+        _fsync_directory(root)
+    finally:
+        temporary.unlink(missing_ok=True)

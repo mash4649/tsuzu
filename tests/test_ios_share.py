@@ -1,9 +1,11 @@
+import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from tsuzu.capture import CaptureRequest, CaptureService, SecretScanResult, SecretScanner
-from tsuzu.ios_share import MacInboxConsumer, MobileOutbox, MobileShareRequest, TransportStatus
+from tsuzu.ios_share import MacInboxConsumer, MobileOutbox, MobileShareRequest, PairedKeyRegistry, TransportStatus, _signed_bytes
 from tsuzu.vault import ActiveVaultLocator
 from tsuzu.writer import AtomicSourceWriter
 
@@ -15,7 +17,15 @@ class IosShareTests(unittest.TestCase):
         vault.mkdir()
         self.locator = ActiveVaultLocator(Path(self.temp.name) / "control")
         self.locator.initialize(vault, operation_id="init")
-        self.outbox = MobileOutbox(Path(self.temp.name) / "mobile", signer=lambda value: "signed:" + value.hex()[:16])
+        self.crypto = Path(self.temp.name) / "crypto"
+        self.crypto.mkdir()
+        self.private_key = self.crypto / "private.pem"
+        self.public_key = self.crypto / "public.pem"
+        subprocess.run(["openssl", "genpkey", "-algorithm", "Ed25519", "-out", str(self.private_key)], check=True, capture_output=True)
+        subprocess.run(["openssl", "pkey", "-in", str(self.private_key), "-pubout", "-out", str(self.public_key)], check=True, capture_output=True)
+        self.registry = PairedKeyRegistry(vault / "system" / "paired-device-keys")
+        self.key_id = self.registry.register(self.public_key.read_bytes())
+        self.outbox = MobileOutbox(Path(self.temp.name) / "mobile", signer=self.sign)
         self.queue = Path(self.temp.name) / "queue"
 
     def tearDown(self):
@@ -28,16 +38,19 @@ class IosShareTests(unittest.TestCase):
             kind="URL",
             content="https://example.com/a",
             created_at="2026-09-22T00:00:00.000Z",
-            device_key_id="phone-1",
-            signature_algorithm="test",
+            device_key_id=self.key_id,
+            signature_algorithm="Ed25519",
         )
 
     def consumer(self, *, trusted=True):
-        return MacInboxConsumer(
-            self.queue,
-            self.locator,
-            verifier=lambda key_id, algorithm, signed, signature: trusted and key_id == "phone-1" and algorithm == "test" and signature.startswith("signed:"),
-        )
+        verifier = None if trusted else lambda *_: False
+        return MacInboxConsumer(self.queue, self.locator, verifier=verifier)
+
+    def sign(self, value):
+        message, signature = self.crypto / "message", self.crypto / "signature"
+        message.write_bytes(value)
+        subprocess.run(["openssl", "pkeyutl", "-sign", "-inkey", str(self.private_key), "-rawin", "-in", str(message), "-out", str(signature)], check=True, capture_output=True)
+        return signature.read_bytes().hex()
 
     def test_signed_delivery_commits_once_and_replay_after_delete_does_not_resurrect(self):
         accepted = self.outbox.accept(self.request())
@@ -62,12 +75,43 @@ class IosShareTests(unittest.TestCase):
         tampered = self.consumer().consume(accepted.envelope_dir)
         self.assertEqual(tampered.status, TransportStatus.TRANSPORT_AUTHENTICITY_FAILED)
 
+    def test_revoked_key_and_expired_envelope_fail_closed(self):
+        accepted = self.outbox.accept(self.request())
+        self.registry.revoke(self.key_id)
+        revoked = self.consumer().consume(accepted.envelope_dir)
+        self.assertEqual(revoked.status, TransportStatus.TRANSPORT_AUTHENTICITY_FAILED)
+        self.assertFalse((self.queue / "pending").exists())
+
+        # Revocation is irreversible; use a distinct key registry for the expiry-only case.
+        expiry_vault = Path(self.temp.name) / "expiry-vault"
+        expiry_vault.mkdir()
+        expiry_locator = ActiveVaultLocator(Path(self.temp.name) / "expiry-control")
+        expiry_locator.initialize(expiry_vault, operation_id="expiry-init")
+        expiry_registry = PairedKeyRegistry(expiry_vault / "system" / "paired-device-keys")
+        expiry_registry.register(self.public_key.read_bytes())
+        envelope = json.loads((accepted.envelope_dir / "envelope.json").read_text())
+        envelope["created_at"] = "2026-01-01T00:00:00Z"
+        (accepted.envelope_dir / "envelope.json").write_text(json.dumps(envelope))
+        expired = MacInboxConsumer(Path(self.temp.name) / "expiry-queue", expiry_locator).consume(accepted.envelope_dir)
+        self.assertEqual(expired.status, TransportStatus.TRANSPORT_AUTHENTICITY_FAILED)
+
+    def test_capture_event_id_cannot_be_reused_for_a_different_signed_envelope(self):
+        accepted = self.outbox.accept(self.request())
+        self.assertEqual(self.consumer().consume(accepted.envelope_dir).status, TransportStatus.MAC_COMMITTED)
+        envelope_path = accepted.envelope_dir / "envelope.json"
+        envelope = json.loads(envelope_path.read_text())
+        envelope["idempotency_key"] = "99999999-9999-4999-8999-999999999999"
+        envelope["authenticity"]["envelope_signature"] = self.sign(_signed_bytes(envelope))
+        envelope_path.write_text(json.dumps(envelope))
+        replay = self.consumer().consume(accepted.envelope_dir)
+        self.assertEqual(replay.status, TransportStatus.TRANSPORT_AUTHENTICITY_FAILED)
+
     def test_secret_is_not_durably_accepted(self):
         request = MobileShareRequest(
             mobile_capture_id="33333333-3333-4333-8333-333333333333",
             idempotency_key="44444444-4444-4444-8444-444444444444",
             kind="TEXT", content="sk-abcdefghijklmnopqrstuvwxyz", created_at="2026-09-22T00:00:00.000Z",
-            device_key_id="phone-1", signature_algorithm="test",
+            device_key_id=self.key_id, signature_algorithm="Ed25519",
         )
         self.assertEqual(self.outbox.accept(request).status, TransportStatus.REJECTED_RESTRICTED)
 
@@ -77,12 +121,12 @@ class IosShareTests(unittest.TestCase):
                 raw = stream.read()
                 return SecretScanResult("CLEAR", self.RULESET_VERSION, (), len(raw), __import__("hashlib").sha256(raw).hexdigest())
 
-        outbox = MobileOutbox(Path(self.temp.name) / "permissive-mobile", signer=lambda value: "signed:" + value.hex()[:16], scanner=PermissiveMobileScanner())
+        outbox = MobileOutbox(Path(self.temp.name) / "permissive-mobile", signer=self.sign, scanner=PermissiveMobileScanner())
         request = MobileShareRequest(
             mobile_capture_id="77777777-7777-4777-8777-777777777777",
             idempotency_key="88888888-8888-4888-8888-888888888888",
             kind="TEXT", content="sk-abcdefghijklmnopqrstuvwxyz", created_at="2026-09-22T00:00:00.000Z",
-            device_key_id="phone-1", signature_algorithm="test",
+            device_key_id=self.key_id, signature_algorithm="Ed25519",
         )
         accepted = outbox.accept(request)
         self.assertEqual(self.consumer().consume(accepted.envelope_dir).status, TransportStatus.REJECTED_RESTRICTED)
@@ -106,7 +150,7 @@ class IosShareTests(unittest.TestCase):
             mobile_capture_id="55555555-5555-4555-8555-555555555555",
             idempotency_key="66666666-6666-4666-8666-666666666666",
             kind="FILE", content=provider_file, created_at="2026-09-22T00:00:00.000Z",
-            device_key_id="phone-1", signature_algorithm="test", original_name="provider.txt",
+            device_key_id=self.key_id, signature_algorithm="Ed25519", original_name="provider.txt",
         )
         accepted = self.outbox.accept(request)
         provider_file.unlink()

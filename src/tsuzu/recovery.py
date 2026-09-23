@@ -24,10 +24,10 @@ PROTECTED = "PROTECTED"
 REBUILDABLE = "REBUILDABLE"
 RUNTIME = "RUNTIME"
 EXTERNAL_SECRET = "EXTERNAL_SECRET"
-PROTECTION_REGISTRY_VERSION = "r5-1.0"
+PROTECTION_REGISTRY_VERSION = "r5-1.1"
 _PROTECTED_TYPES = frozenset({"SOURCE", "SOURCE_VERSION"})
 _SCHEMA_VERSIONS = {"SOURCE": "1.0.0", "SOURCE_VERSION": "1.0.0"}
-_PROTECTED_SYSTEM = frozenset({"import-receipts", "history-coverage", "acquisition-receipts", "c1-receipts.jsonl"})
+_PROTECTED_SYSTEM = frozenset({"import-receipts", "history-coverage", "acquisition-receipts", "c1-receipts.jsonl", "paired-device-keys", "ios-share-event-receipts"})
 _RUNTIME_SYSTEM = frozenset({"staging", "quarantine", "write.lock", "recovery-receipts.jsonl", "acquisition-jobs"})
 
 
