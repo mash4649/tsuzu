@@ -199,6 +199,9 @@ class DerivedJobQueue:
             refs = tuple(_normalize_refs(tuple(tuple(item) for item in job["input_refs"])))
         except (KeyError, TypeError, ValueError):
             return (), "CORRUPT_QUEUE"
+        fingerprint = hashlib.sha256(json.dumps(refs, separators=(",", ":")).encode()).hexdigest()
+        if not refs or fingerprint != job.get("input_fingerprint"):
+            return (), "CORRUPT_QUEUE"
         try:
             if any(self.deletion_resolver.resolve(kind, object_id).state != NOT_DELETED for kind, object_id, _, _ in refs):
                 return (), "INPUT_NOT_ELIGIBLE"

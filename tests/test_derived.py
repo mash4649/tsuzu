@@ -191,6 +191,23 @@ class DerivedJobQueueTests(unittest.TestCase):
 
         self.assertEqual(result.status, DerivedStatus.CORRUPT_QUEUE)
 
+    def test_changed_claimed_input_fingerprint_cannot_reach_the_owner_callback(self):
+        class LiveDeletion:
+            def resolve(self, object_type, object_id):
+                return type("Resolution", (), {"state": "NOT_DELETED"})()
+
+        queue = DerivedJobQueue(Path(self.temp.name) / "changed-refs", deletion_resolver=LiveDeletion())
+        job = queue.enqueue(self.request)
+        queue.claim("worker-a")
+        path = queue.root / "jobs" / f"{job.job_id}.json"
+        record = json.loads(path.read_text())
+        record["input_refs"][0][1] = "22222222-2222-4222-8222-222222222222"
+        path.write_text(json.dumps(record))
+
+        result = queue.preflight(job.job_id, "worker-a", lambda refs: self.fail("must not run"))
+
+        self.assertEqual(result.status, DerivedStatus.CORRUPT_QUEUE)
+
 
 if __name__ == "__main__":
     unittest.main()
