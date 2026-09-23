@@ -1,13 +1,16 @@
+import hashlib
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-from tsuzu.historical_import import AppleNotesAdapter, HistoricalItem, HistoricalImporter, MarkdownFolderAdapter
+from tsuzu.historical_import import AppleNotesAdapter, HistoricalItem, HistoricalImporter, MacOSAppleNotesBridge, MarkdownFolderAdapter
 from tsuzu.capture import CaptureRequest, CaptureService
 from tsuzu.worker import SingleWriterWorker, WorkerStatus
 from tsuzu.vault import ActiveVaultLocator
 from tsuzu.writer import AtomicSourceWriter
+from tsuzu.__main__ import build_parser
 
 
 class HistoricalImporterTests(unittest.TestCase):
@@ -77,11 +80,48 @@ class HistoricalImporterTests(unittest.TestCase):
         items = list(MarkdownFolderAdapter(root).enumerate())
         self.assertEqual([item.external_item_key for item in items], ["keep.md"])
 
-    def test_apple_notes_boundary_only_reads_permissioned_selection(self):
+    def test_apple_notes_selected_note_maps_through_a3_a4(self):
         calls = []
-        adapter = AppleNotesAdapter(lambda: calls.append("read") or [self.item(b"note")])
-        self.assertEqual([item.content for item in adapter.enumerate()], [b"note"])
+        bridge = MacOSAppleNotesBridge(lambda: calls.append("read") or json.dumps({
+            "id": "note-id", "title": "Selected note", "body": "note", "created_at": "2026-09-21T00:00:00.000Z",
+            "modified_at": "2026-09-22T00:00:00.000Z",
+        }))
+        adapter = AppleNotesAdapter(bridge)
+        item = next(iter(adapter.enumerate()))
         self.assertEqual(calls, ["read"])
+        self.assertEqual(item.original_name, "Selected note")
+        self.assertEqual(item.source_url, "x-apple-notes://selected/" + hashlib.sha256(b"note-id").hexdigest())
+        session = self.importer.import_items("APPLE_NOTES", [item])
+        self.assertEqual(session.committed_count, 1)
+        path = AtomicSourceWriter(self.locator).inspect_source(session.source_ids[0]).path / "source.md"
+        manifest = json.loads(path.read_text().split("---\n", 2)[1])
+        self.assertEqual(manifest["source"]["origin_locator"], {"type": "APPLE_NOTES", "value": item.source_url})
+        self.assertEqual(manifest["source"]["original_name"], "Selected note")
+        self.assertEqual(manifest["import"]["external_modified_at_observed"], "2026-09-22T00:00:00.000Z")
+        self.assertEqual(self.importer.import_items("APPLE_NOTES", [item]).already_imported_count, 1)
+
+    def test_apple_notes_bridge_unavailable_or_malformed_result_makes_no_writes(self):
+        for runner in (
+            lambda: json.dumps({"id": "note-id"}),
+            lambda: (_ for _ in ()).throw(subprocess.CalledProcessError(1, "osascript")),
+        ):
+            with self.subTest(runner=runner), self.assertRaises(ValueError):
+                self.importer.import_items("APPLE_NOTES", AppleNotesAdapter(MacOSAppleNotesBridge(runner)).enumerate())
+            self.assertFalse((self.queue / "pending").exists())
+
+    def test_apple_notes_secret_fixture_is_blocked_without_body_copy(self):
+        bridge = MacOSAppleNotesBridge(lambda: json.dumps({
+            "id": "note-id", "title": "Secret", "body": "-----BEGIN OPENSSH PRIVATE KEY-----",
+            "created_at": "2026-09-21T00:00:00.000Z", "modified_at": "2026-09-22T00:00:00.000Z",
+        }))
+        session = self.importer.import_items("APPLE_NOTES", AppleNotesAdapter(bridge).enumerate())
+        self.assertEqual(session.blocked_count, 1)
+        receipts = self.locator.resolve_active_vault().root_ref / "system" / "import-receipts"
+        self.assertNotIn("OPENSSH", "\n".join(path.read_text() for path in receipts.glob("*.json")))
+
+    def test_apple_notes_cli_requires_only_the_core_queue_and_locator(self):
+        args = build_parser().parse_args(["apple-notes-import", "--queue-root", "queue", "--control-root", "control"])
+        self.assertEqual(args.command, "apple-notes-import")
 
     def test_recent_selection_and_attachment_skip_are_recorded_without_body(self):
         session = self.importer.import_items("MARKDOWN_FOLDER", [

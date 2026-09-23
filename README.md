@@ -34,3 +34,13 @@ must not be treated as recallable TSUZU memory before that receipt exists.
 `.codex/hooks.json` registers a `UserPromptSubmit` hook. After you review and trust that hook in Codex, each clean user prompt is submitted through the local A3/A4 Core queue. A later decision prompt may receive up to three prior, policy-approved `UNTRUSTED_DATA` excerpts with a body-free trace; secrets, SENSITIVE, and RESTRICTED content are never injected.
 
 The hook never reads `transcript_path`, calls a network service, or performs actions. Set `TSUZU_CODEX_PASSIVE_RECALL=0` before starting Codex to keep automatic capture while disabling proposal context. To share one selected Core with Tauri, set `TSUZU_CORE_ROOT` to an absolute, per-project local directory; its `control`, `queue`, `index`, and `runtime` paths are the values passed to `tsuzu desktop-ingress`. The first Codex use binds that root to a body-free project hash and another project is rejected. Leaving it unset preserves the legacy per-project `TSUZU_CODEX_DATA_ROOT` layout. Neither mode migrates or rewrites an existing Vault.
+
+## Apple Notes selected-note import
+
+Select exactly one note in the macOS Notes app, then run the user-initiated command below. It asks macOS for Notes Automation permission if needed, reads only that selection, and passes it through the existing local secret guard and single-writer queue. It never scans accounts, folders, or unselected notes; cancellation, denial, or malformed bridge output makes no Canonical write.
+
+```sh
+PYTHONPATH=src python3 -m tsuzu apple-notes-import --queue-root /absolute/core/queue --control-root /absolute/core/control
+```
+
+The receipt summary is body-free. The Canonical Source retains the note title, observed modification time, and a hashed `x-apple-notes://selected/...` locator; the raw Notes identifier is kept only in the body-free import identity hash. Re-run the command for a changed selected note; an identical snapshot is idempotent.

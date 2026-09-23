@@ -163,7 +163,7 @@ class CaptureService:
             if kind == "URL" and not _valid_url(raw):
                 return CaptureResult(CaptureStatus.REJECTED_INVALID_INPUT, reason="URL must be HTTP(S)")
             scan = self.scanner.scan_bytes(raw)
-            return self._accept(request, kind, raw, scan)
+            return self._accept(request, kind, raw, scan, original_name=request.original_name)
         except UnicodeDecodeError:
             return CaptureResult(CaptureStatus.REJECTED_INVALID_INPUT, reason="input must be UTF-8")
         except ValueError as exc:

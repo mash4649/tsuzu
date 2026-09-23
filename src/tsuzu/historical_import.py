@@ -6,6 +6,7 @@ import hashlib
 import heapq
 import json
 import os
+import subprocess
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ class HistoricalItem:
     modified_at_observed: str
     title_hint: str | None = None
     original_name: str | None = None
+    source_url: str | None = None
     skip_reason: str | None = None
 
 
@@ -72,19 +74,63 @@ class MarkdownFolderAdapter:
             yield HistoricalItem(path.relative_to(self.root).as_posix(), content, _timestamp(after.st_mtime), title_hint=path.stem, original_name=path.name)
 
 
+_APPLE_NOTES_SELECTED_NOTE_SCRIPT = r'''
+const notes = Application("Notes");
+const selected = notes.selection();
+if (selected.length !== 1) {
+  throw new Error("Select exactly one Apple Note before importing.");
+}
+const note = selected[0];
+JSON.stringify({
+  id: note.id(),
+  title: note.name(),
+  body: note.body(),
+  created_at: note.creationDate().toISOString(),
+  modified_at: note.modificationDate().toISOString(),
+});
+'''
+
+
+class MacOSAppleNotesBridge:
+    """Reads exactly one already-selected Note via the macOS Automation prompt."""
+
+    def __init__(self, runner: Callable[[], str] | None = None):
+        self._runner = runner or self._run_selection_script
+
+    def read_selected_item(self) -> HistoricalItem:
+        try:
+            value = json.loads(self._runner())
+            if not isinstance(value, dict) or set(value) != {"id", "title", "body", "created_at", "modified_at"}:
+                raise ValueError("Apple Notes bridge returned an invalid selected note")
+            note_id, title, body = (value[name] for name in ("id", "title", "body"))
+            if not isinstance(note_id, str) or not note_id or not isinstance(title, str) or not title or not isinstance(body, str):
+                raise ValueError("Apple Notes bridge returned an invalid selected note")
+            _validate_timestamp(value["created_at"])
+            _validate_timestamp(value["modified_at"])
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ValueError("Apple Notes selected-note bridge is unavailable or invalid") from exc
+        locator = "x-apple-notes://selected/" + hashlib.sha256(note_id.encode()).hexdigest()
+        return HistoricalItem(note_id, body.encode("utf-8"), value["modified_at"], title_hint=title, original_name=title, source_url=locator)
+
+    @staticmethod
+    def _run_selection_script() -> str:
+        result = subprocess.run(
+            ("/usr/bin/osascript", "-l", "JavaScript", "-e", _APPLE_NOTES_SELECTED_NOTE_SCRIPT),
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+        return result.stdout
+
+
 class AppleNotesAdapter:
-    """Read-only OS bridge; the caller supplies the permissioned selection reader."""
+    """Read-only adapter for one note explicitly selected in Apple Notes."""
 
     adapter_id = "APPLE_NOTES"
 
-    def __init__(self, read_selection: Callable[[], Iterable[HistoricalItem]]):
-        self.read_selection = read_selection
+    def __init__(self, bridge: MacOSAppleNotesBridge | None = None):
+        self.bridge = bridge or MacOSAppleNotesBridge()
 
     def enumerate(self) -> Iterable[HistoricalItem]:
-        for item in self.read_selection():
-            if not isinstance(item, HistoricalItem):
-                raise ValueError("Apple Notes bridge returned an invalid item")
-            yield item
+        yield self.bridge.read_selected_item()
 
 
 class HistoricalImporter:
@@ -151,6 +197,7 @@ class HistoricalImporter:
                         "import_session_id": session_id,
                         "previous_snapshot_ref": previous,
                     },
+                    origin_locator={"type": "APPLE_NOTES", "value": item.source_url} if adapter_id == "APPLE_NOTES" and item.source_url else None,
                 )
                 captured = CaptureService(self.queue_root).capture(request)
                 if captured.status == CaptureStatus.REJECTED_RESTRICTED:

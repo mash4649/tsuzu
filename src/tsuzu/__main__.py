@@ -6,6 +6,7 @@ from .capability import CapabilityRegistry
 from .claude_adapter import ClaudeHostAdapter, ClaudeMcpServer, serve_stdio, verify_claude_capability, verify_codex_capability, verify_cursor_capability
 from .context import ContextBundleBuilder
 from .desktop_ingress import DesktopDraftIngress
+from .historical_import import AppleNotesAdapter, HistoricalImporter
 from .index import IndexManager
 from .retrieval import RetrievalService
 from .vault import ActiveVaultLocator
@@ -26,12 +27,19 @@ def build_parser() -> argparse.ArgumentParser:
     desktop_ingress.add_argument("--queue-root", required=True)
     desktop_ingress.add_argument("--control-root", required=True)
     desktop_ingress.add_argument("--index-root", required=True)
+    apple_notes = subparsers.add_parser("apple-notes-import")
+    apple_notes.add_argument("--queue-root", required=True)
+    apple_notes.add_argument("--control-root", required=True)
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
     locator = ActiveVaultLocator(args.control_root)
+    if args.command == "apple-notes-import":
+        result = HistoricalImporter(args.queue_root, locator).import_items("APPLE_NOTES", AppleNotesAdapter().enumerate(), recent_n=1)
+        print(result.import_session_id, result.committed_count, result.already_imported_count, result.blocked_count, result.failed_count)
+        return
     index = IndexManager(args.index_root, locator)
     index.open()
     try:
