@@ -142,15 +142,11 @@ class DerivedJobQueue:
             job = _job_for_worker(jobs, job_id, worker_id)
             if job is None:
                 return DerivedPreflight(DerivedStatus.CLAIM_MISMATCH, job_id)
-            if self.deletion_resolver is None:
-                return self._block(jobs, job, "DELETION_RESOLVER_REQUIRED")
-            try:
-                refs = tuple(_normalize_refs(tuple(tuple(item) for item in job["input_refs"])))
-            except (KeyError, TypeError, ValueError):
+            refs, failure = self._live_input_refs(job)
+            if failure == "CORRUPT_QUEUE":
                 return DerivedPreflight(DerivedStatus.CORRUPT_QUEUE, job_id, "invalid input references")
-            for object_type, object_id, _, _ in refs:
-                if self.deletion_resolver.resolve(object_type, object_id).state != NOT_DELETED:
-                    return self._block(jobs, job, "INPUT_NOT_ELIGIBLE")
+            if failure:
+                return self._block(jobs, job, failure)
             try:
                 valid = validate_inputs(refs)
             except Exception:
@@ -172,6 +168,10 @@ class DerivedJobQueue:
                 return DerivedJobResult(DerivedStatus.CLAIM_MISMATCH, job_id)
             if state == "SUCCEEDED" and job.get("preflight_fingerprint") != job.get("input_fingerprint"):
                 return self._block_result(jobs, job, "PREFLIGHT_REQUIRED")
+            if state == "SUCCEEDED":
+                _, failure = self._live_input_refs(job)
+                if failure:
+                    return self._block_result(jobs, job, failure)
             if state == "RETRY_WAIT":
                 try:
                     _parse_time(next_attempt_at or "")
@@ -191,6 +191,20 @@ class DerivedJobQueue:
             job["lease_expires_at"] = None
             _atomic_json(jobs / f"{job_id}.json", job)
             return DerivedJobResult(state, job_id)
+
+    def _live_input_refs(self, job: dict[str, object]) -> tuple[tuple[tuple[str, str, int, str], ...], str | None]:
+        if self.deletion_resolver is None:
+            return (), "DELETION_RESOLVER_REQUIRED"
+        try:
+            refs = tuple(_normalize_refs(tuple(tuple(item) for item in job["input_refs"])))
+        except (KeyError, TypeError, ValueError):
+            return (), "CORRUPT_QUEUE"
+        try:
+            if any(self.deletion_resolver.resolve(kind, object_id).state != NOT_DELETED for kind, object_id, _, _ in refs):
+                return (), "INPUT_NOT_ELIGIBLE"
+        except Exception:
+            return (), "INPUT_NOT_ELIGIBLE"
+        return refs, None
 
     def _block(self, jobs: Path, job: dict[str, object], reason: str) -> DerivedPreflight:
         self._block_result(jobs, job, reason)

@@ -155,6 +155,25 @@ class DerivedJobQueueTests(unittest.TestCase):
 
         self.assertEqual(result.status, DerivedStatus.BLOCKED_STALE)
 
+    def test_deleted_input_after_preflight_cannot_complete(self):
+        class ChangingDeletion:
+            deleted = False
+
+            def resolve(self, object_type, object_id):
+                return type("Resolution", (), {"state": "DELETED" if self.deleted else "NOT_DELETED"})()
+
+        deletion = ChangingDeletion()
+        queue = DerivedJobQueue(Path(self.temp.name) / "deleted-after-preflight", deletion_resolver=deletion)
+        job = queue.enqueue(self.request)
+        queue.claim("worker-a")
+        self.assertEqual(queue.preflight(job.job_id, "worker-a", lambda refs: True).status, DerivedStatus.READY)
+
+        deletion.deleted = True
+        result = queue.settle(job.job_id, "worker-a", "SUCCEEDED")
+
+        self.assertEqual(result.status, DerivedStatus.BLOCKED_STALE)
+        self.assertEqual(result.reason, "INPUT_NOT_ELIGIBLE")
+
     def test_corrupt_claimed_input_references_cannot_reach_the_owner_callback(self):
         class LiveDeletion:
             def resolve(self, object_type, object_id):
