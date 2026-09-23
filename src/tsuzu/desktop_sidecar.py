@@ -23,7 +23,7 @@ def main() -> None:
     vault_root = Path(args.vault_root).expanduser()
     if not core_root.is_absolute() or not vault_root.is_absolute() or core_root.is_symlink():
         raise SystemExit("Core and Vault roots must be absolute real paths")
-    if any((core_root / name).is_symlink() for name in ("control", "queue", "index")):
+    if any((core_root / name).is_symlink() for name in ("control", "runtime", "index")):
         raise SystemExit("Core state directories must not be symlinks")
     locator = ActiveVaultLocator(core_root / "control")
     _ensure_selected_vault(locator, vault_root)
@@ -31,7 +31,7 @@ def main() -> None:
     index = IndexManager(core_root / "index", locator)
     index.open()
     try:
-        results = DesktopDraftIngress(args.app_local_root, core_root / "queue", locator, index).process_all()
+        results = DesktopDraftIngress(args.app_local_root, core_root / "runtime" / "queue", locator, index).process_all()
         print(json.dumps([asdict(result) for result in results], ensure_ascii=False, sort_keys=True))
     finally:
         index.close()

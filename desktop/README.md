@@ -28,24 +28,25 @@ pnpm tauri build --config src-tauri/tauri.local-macos.conf.json --bundles app
 from the existing Python Core. The local macOS config uses ad-hoc signing
 (`-`): it is free and suitable for this Mac's verification only, not public
 distribution. macOS may still require manually allowing the app in Privacy &
-Security. This build defaults to `~/Desktop/++++TSUZU/Core` and
-`~/Desktop/++++TSUZU/Vault`; set `TSUZU_CORE_ROOT` and `TSUZU_VAULT_ROOT` in
-the launch environment to test another selection. Initial setup only binds an
-empty Vault; an existing, unhealthy, or differently selected Core is left
-untouched and reported as an error.
+Security. This build defaults to `~/Library/Application Support/TSUZU` and
+`~/Library/Mobile Documents/com~apple~CloudDocs/TSUZU/Vault`; set
+`TSUZU_CORE_ROOT` and `TSUZU_VAULT_ROOT` in the launch environment to test
+another selection. Initial setup only binds an empty Vault; an existing,
+unhealthy, or differently selected Core is left untouched and reported as an
+error. The shared queue is `Core/runtime/queue`.
 
 ## Import a draft into the selected Core
 
 From the repository root, set the same absolute `TSUZU_CORE_ROOT` and
 `TSUZU_VAULT_ROOT` used by the Codex hook. `TSUZU_CORE_ROOT` selects `control`,
-`queue`, `index`, and `runtime`; `TSUZU_VAULT_ROOT` selects the one Canonical
+`runtime/queue`, `index`, and `runtime`; `TSUZU_VAULT_ROOT` selects the one Canonical
 Vault. The command deliberately requires those paths: it never guesses or
 migrates a second Vault.
 
 ```sh
 PYTHONPATH=src python3 -m tsuzu desktop-ingress \
   --app-local-root "<Tauri AppLocalData root>" \
-  --queue-root "$TSUZU_CORE_ROOT/queue" \
+  --queue-root "$TSUZU_CORE_ROOT/runtime/queue" \
   --control-root "$TSUZU_CORE_ROOT/control" \
   --index-root "$TSUZU_CORE_ROOT/index"
 ```

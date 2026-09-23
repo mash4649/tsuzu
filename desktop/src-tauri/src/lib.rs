@@ -22,10 +22,12 @@ fn process_desktop_ingress(app: tauri::AppHandle) -> Result<IngressResponse, Str
     let home = app.path().home_dir().map_err(|error| error.to_string())?;
     let core_root = std::env::var_os("TSUZU_CORE_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home.join("Desktop/++++TSUZU/Core"));
+        .unwrap_or_else(|| home.join("Library/Application Support/TSUZU"));
     let vault_root = std::env::var_os("TSUZU_VAULT_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home.join("Desktop/++++TSUZU/Vault"));
+        .unwrap_or_else(|| {
+            home.join("Library/Mobile Documents/com~apple~CloudDocs/TSUZU/Vault")
+        });
     let app_local_root = app.path().app_local_data_dir().map_err(|error| error.to_string())?;
     let bundled_sidecar = std::env::current_exe()
         .map_err(|error| error.to_string())?
