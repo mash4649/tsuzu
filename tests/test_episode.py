@@ -1,0 +1,30 @@
+import unittest
+
+from tsuzu.episode import EpisodeDraft, validate_episode
+
+
+class EpisodeTests(unittest.TestCase):
+    def test_multi_message_episode_keeps_actor_aware_trace_and_derived_fields(self):
+        episode = EpisodeDraft(
+            "11111111-1111-4111-8111-111111111111",
+            (("22222222-2222-4222-8222-222222222222", "USER"), ("33333333-3333-4333-8333-333333333333", "ASSISTANT")),
+            "2026-09-23T00:00:00.000Z", "2026-09-23T00:01:00.000Z", "storage choice", "Compared local storage options.", "b2-rules-v1", 0.8, 2, 0,
+        )
+
+        validate_episode(episode)
+        self.assertEqual(episode.processing_state, "DERIVED")
+        self.assertEqual(len(episode.message_refs), 2)
+
+    def test_episode_rejects_invalid_trace_or_coverage(self):
+        episode = EpisodeDraft(
+            "11111111-1111-4111-8111-111111111111",
+            (("not-a-uuid", "USER"),),
+            "2026-09-23T00:01:00.000Z", "2026-09-23T00:00:00.000Z", "topic", "summary", "b2-rules-v1", 1.2, 1, 0,
+        )
+
+        with self.assertRaises(ValueError):
+            validate_episode(episode)
+
+
+if __name__ == "__main__":
+    unittest.main()
