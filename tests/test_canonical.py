@@ -62,6 +62,15 @@ class CanonicalStoreTests(unittest.TestCase):
                 schema_owner="B1",
             )
         )
+        self.registry.register(
+            ObjectRegistration(
+                object_type="DERIVED_EPISODE",
+                storage_class="DERIVED",
+                mutability="IMMUTABLE",
+                body_mode="NONE",
+                schema_owner="C4/B2",
+            )
+        )
         self.store = CanonicalStore(self.locator, self.registry)
 
     def tearDown(self):
@@ -139,6 +148,14 @@ class CanonicalStoreTests(unittest.TestCase):
         self.assertEqual(first.status, "COMMITTED_LOCAL")
         self.assertEqual(self.store.append_canonical_event(retry).status, "ALREADY_COMMITTED")
         self.assertFalse((first.path / "payload").exists())
+
+    def test_derived_registration_is_not_written_under_canonical_truth(self):
+        event = CreateCanonicalIntent("DERIVED_EPISODE", "77777777-7777-4777-8777-777777777777", "1.0.0", "2026-09-12T00:00:00.000Z", "derived-1", envelope())
+        result = self.store.append_canonical_event(event)
+        root = self.locator.resolve_active_vault().root_ref
+        self.assertEqual(result.status, "COMMITTED_LOCAL")
+        self.assertTrue(str(result.path).startswith(str(root / "derived")))
+        self.assertFalse((root / "canonical" / "objects" / "DERIVED_EPISODE" / event.object_id).exists())
 
     def test_restricted_and_stale_generation_are_rejected(self):
         restricted = self.intent()

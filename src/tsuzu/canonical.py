@@ -129,8 +129,8 @@ class CanonicalStore:
                 if prior:
                     if prior.get("fingerprint") != fingerprint:
                         return CommitResult("IDEMPOTENCY_CONFLICT", intent.object_type, intent.object_id, reason="idempotency key fingerprint differs")
-                    return _receipt_result(prior, intent.object_type, intent.object_id, canonical)
-                final = _object_path(canonical, intent.object_type, intent.object_id)
+                    return _receipt_result(prior, intent.object_type, intent.object_id, root, registration)
+                final = _object_path(_storage_root(root, registration), intent.object_type, intent.object_id)
                 if final.exists() or final.is_symlink():
                     existing = self.inspect_canonical(intent.object_type, intent.object_id)
                     if existing.status == "VALID" and _create_fingerprint(_manifest_at(final)) == fingerprint:
@@ -188,8 +188,8 @@ class CanonicalStore:
                 if prior:
                     if prior.get("fingerprint") != fingerprint:
                         return CommitResult("IDEMPOTENCY_CONFLICT", intent.object_type, intent.object_id, reason="idempotency key fingerprint differs")
-                    return _receipt_result(prior, intent.object_type, intent.object_id, canonical)
-                final = _object_path(canonical, intent.object_type, intent.object_id)
+                    return _receipt_result(prior, intent.object_type, intent.object_id, handle.root_ref, registration)
+                final = _object_path(_storage_root(handle.root_ref, registration), intent.object_type, intent.object_id)
                 current = self.inspect_canonical(intent.object_type, intent.object_id)
                 if current.status != "VALID":
                     return CommitResult("CANONICAL_CORRUPT", intent.object_type, intent.object_id, reason=current.reason)
@@ -244,7 +244,7 @@ class CanonicalStore:
         try:
             _validate_id(object_id)
             handle = self.locator.resolve_active_vault()
-            path = _object_path(handle.root_ref / "canonical", object_type, object_id, create=False)
+            path = _object_path(_storage_root(handle.root_ref, registration), object_type, object_id, create=False)
             if path.is_symlink() or not path.exists():
                 return IntegrityResult("MISSING", object_type, object_id, path=path)
             manifest = _parse_manifest((path / "object.md").read_text())
@@ -300,6 +300,13 @@ def _object_path(canonical: Path, object_type: str, object_id: str, *, create: b
     if create:
         type_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     return type_root / object_id
+
+
+def _storage_root(root: Path, registration: ObjectRegistration) -> Path:
+    path = root / ("derived" if registration.storage_class == "DERIVED" else "canonical")
+    if path.is_symlink():
+        raise WriterError("FILESYSTEM_UNSUPPORTED", "object storage root contains symlink")
+    return path
 
 
 def _receipt_path(system: Path) -> Path:
@@ -491,8 +498,8 @@ def _find_receipt(path: Path, object_type: str, object_id: str, operation: str, 
     return None
 
 
-def _receipt_result(record: dict[str, object], object_type: str, object_id: str, canonical: Path) -> CommitResult:
-    path = _object_path(canonical, object_type, object_id, create=False)
+def _receipt_result(record: dict[str, object], object_type: str, object_id: str, root: Path, registration: ObjectRegistration) -> CommitResult:
+    path = _object_path(_storage_root(root, registration), object_type, object_id, create=False)
     if not path.exists() or path.is_symlink():
         return CommitResult("CANONICAL_CORRUPT", object_type, object_id, record.get("revision"), path, "receipt exists but Canonical object is missing")
     return CommitResult("ALREADY_COMMITTED", object_type, object_id, record.get("revision"), path)
