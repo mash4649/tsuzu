@@ -472,6 +472,8 @@ def _create_fingerprint(manifest: dict[str, object]) -> str:
     stable = copy.deepcopy(manifest)
     stable.pop("created_at", None)
     stable.pop("updated_at", None)
+    if isinstance(stable.get("derivation"), dict):
+        stable["derivation"].pop("created_at", None)
     return _fingerprint(stable)
 
 
