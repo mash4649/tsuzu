@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .capture import CaptureRequest, CaptureService, CaptureStatus, SecretScanner
+from .chronicle import CodexHookChronicleCapture
 from .context import ContextBundleBuilder
 from .index import IndexManager
 from .retrieval import RetrievalRequest, RetrievalService
@@ -38,6 +39,7 @@ class HookResult:
     capture_status: str
     injected_source_ids: tuple[str, ...] = ()
     hook_output: dict[str, object] | None = None
+    chronicle_status: str = ""
 
     def __post_init__(self) -> None:
         if self.hook_output is None:
@@ -79,11 +81,15 @@ class CodexPromptHook:
         self.passive_trace_root = self.runtime_root / "passive-traces"
 
     def handle(self, raw_event: object) -> HookResult:
+        if isinstance(raw_event, dict) and raw_event.get("hook_event_name") == "Stop":
+            status = self._capture_chronicle(raw_event)
+            return HookResult(status, chronicle_status=status)
         event, status = self._event(raw_event)
         if event is None:
             return HookResult(status)
         if SecretScanner().scan_bytes(event.prompt.encode()).outcome != "CLEAR":
             return HookResult("EXCLUDED_RESTRICTED")
+        chronicle_status = self._capture_chronicle(raw_event)
         try:
             locator = self._locator()
             self._assert_project_binding()
@@ -101,20 +107,38 @@ class CodexPromptHook:
                 origin_locator={"type": "CODEX_TURN", "value": _hash(f"{event.session_id}:{event.turn_id}")},
             ))
             if capture.status == CaptureStatus.REJECTED_RESTRICTED:
-                return HookResult("EXCLUDED_RESTRICTED")
+                return HookResult("EXCLUDED_RESTRICTED", chronicle_status=chronicle_status)
             if capture.status not in {CaptureStatus.ACCEPTED, CaptureStatus.ALREADY_ACCEPTED} or capture.source_id is None:
-                return HookResult("IGNORED_RUNTIME")
+                return HookResult("IGNORED_RUNTIME", chronicle_status=chronicle_status)
             if capture.status == CaptureStatus.ALREADY_ACCEPTED:
-                return HookResult(self._materialize(locator, index, capture.source_id, False))
+                return HookResult(self._materialize(locator, index, capture.source_id, False), chronicle_status=chronicle_status)
             try:
                 injected = self._passive_context(locator, index, event)
             except Exception:
                 injected = (), {}
-            return HookResult(self._materialize(locator, index, capture.source_id, capture.status == CaptureStatus.ACCEPTED), *injected)
+            return HookResult(self._materialize(locator, index, capture.source_id, capture.status == CaptureStatus.ACCEPTED), *injected, chronicle_status=chronicle_status)
         except Exception:
-            return HookResult("IGNORED_RUNTIME")
+            return HookResult("IGNORED_RUNTIME", chronicle_status=chronicle_status)
         finally:
             index.close()
+
+    def _capture_chronicle(self, raw_event: object) -> str:
+        if not isinstance(raw_event, dict) or raw_event.get("hook_event_name") not in {"UserPromptSubmit", "Stop"}:
+            return "INVALID_HOST_EVENT"
+        cwd = raw_event.get("cwd")
+        if not isinstance(cwd, str) or not cwd.strip():
+            return "INVALID_HOST_EVENT"
+        try:
+            if Path(cwd).resolve() != self.project_root:
+                return "NOT_CAPTURED_SCOPE"
+        except OSError:
+            return "NOT_CAPTURED_SCOPE"
+        try:
+            locator = self._locator()
+            self._assert_project_binding()
+            return CodexHookChronicleCapture(locator, self.project_root).capture(raw_event).status
+        except Exception:
+            return "PERSISTENCE_FAILED"
 
     def source_count(self) -> int:
         try:

@@ -25,6 +25,7 @@ class ChronicleStatus:
     CONFLICTING_EVENT = "CONFLICTING_EVENT"
     SECRET_SCAN_UNAVAILABLE = "SECRET_SCAN_UNAVAILABLE"
     PERSISTENCE_FAILED = "PERSISTENCE_FAILED"
+    PARTIAL_CAPTURED = "PARTIAL_CAPTURED"
 
 
 @dataclass(frozen=True)
@@ -148,6 +149,99 @@ class ChronicleCapture:
             results.append(CapturedMessage(object_id, event.actor, event.sequence, content_state))
         status = ChronicleStatus.ALREADY_CAPTURED if all(value == "ALREADY_COMMITTED" for value in statuses) else ChronicleStatus.CAPTURED
         return ChronicleResult(status, tuple(results))
+
+    def inspect_message(self, object_id: str) -> dict[str, object]:
+        inspected = self.store.inspect_canonical("CONVERSATION_MESSAGE", object_id)
+        if inspected.status != "VALID" or inspected.path is None:
+            raise ValueError("message is unavailable")
+        return _parse_manifest((inspected.path / "object.md").read_text())
+
+    def read_body(self, object_id: str) -> bytes | None:
+        inspected = self.store.inspect_canonical("CONVERSATION_MESSAGE", object_id)
+        if inspected.status != "VALID" or inspected.path is None:
+            return None
+        payload = inspected.path / "payload" / "original"
+        return payload.read_bytes() if payload.exists() and not payload.is_symlink() else None
+
+
+class CodexHookChronicleCapture:
+    """Captures only stable, project-scoped Codex hook message fields; never reads transcripts."""
+
+    def __init__(self, locator: ActiveVaultLocator, workspace: str | Path, *, scanner: SecretScanner | None = None):
+        self.locator = locator
+        self.workspace = str(Path(workspace).resolve())
+        if not Path(self.workspace).is_absolute():
+            raise ValueError("workspace must be absolute")
+        self.scanner = scanner or SecretScanner()
+        objects = ObjectRegistry()
+        objects.register(ObjectRegistration("CONVERSATION_SESSION", "CANONICAL", "IMMUTABLE", "NONE", "B1N"))
+        objects.register(ObjectRegistration("CONVERSATION_MESSAGE", "CANONICAL", "IMMUTABLE", "OPTIONAL_PAYLOAD", "B1N"))
+        self.store = CanonicalStore(locator, objects)
+
+    def capture(self, raw_event: object) -> ChronicleResult:
+        if not isinstance(raw_event, dict):
+            return ChronicleResult(ChronicleStatus.INVALID_HOST_EVENT)
+        event_name = raw_event.get("hook_event_name")
+        session_id, turn_id, cwd = (raw_event.get(key) for key in ("session_id", "turn_id", "cwd"))
+        if event_name not in {"UserPromptSubmit", "Stop"} or not all(isinstance(value, str) and value.strip() for value in (session_id, turn_id, cwd)):
+            return ChronicleResult(ChronicleStatus.INVALID_HOST_EVENT)
+        try:
+            if str(Path(cwd).resolve()) != self.workspace:
+                return ChronicleResult(ChronicleStatus.NOT_CAPTURED_SCOPE)
+        except OSError:
+            return ChronicleResult(ChronicleStatus.NOT_CAPTURED_SCOPE)
+
+        session_id = str(session_id)
+        turn_id = str(turn_id)
+        session_object_id = _stable_uuid(f"B1N/session/v1/CODEX/{self.workspace}/{session_id}")
+        session = self.store.append_canonical_event(CreateCanonicalIntent(
+            "CONVERSATION_SESSION", session_object_id, "1.0.0", _now(), f"b1n-session:{self.workspace}:{session_id}",
+            _envelope("SYSTEM_OBSERVED", "OBSERVED", "OBSERVED", "SYSTEM_OBSERVED", {
+                "host_id": "CODEX", "host_session_ref": session_id, "workspace": self.workspace,
+                "source_order": "CODEX_HOOKS_V1", "capture_mode": "CODEX_HOOK_MESSAGE_ONLY", "coverage": "PARTIAL",
+            }),
+        ))
+        if session.status not in {"COMMITTED_LOCAL", "ALREADY_COMMITTED"}:
+            return ChronicleResult(ChronicleStatus.PERSISTENCE_FAILED, reason=session.status)
+
+        if event_name == "UserPromptSubmit":
+            actor, sequence, text = "USER", 0, raw_event.get("prompt")
+        else:
+            if not isinstance(raw_event.get("stop_hook_active"), bool):
+                return ChronicleResult(ChronicleStatus.INVALID_HOST_EVENT)
+            if raw_event["stop_hook_active"]:
+                return ChronicleResult(ChronicleStatus.PARTIAL_CAPTURED)
+            actor, sequence, text = "ASSISTANT", 1, raw_event.get("last_assistant_message")
+            if not isinstance(text, str) or not text.strip():
+                return ChronicleResult(ChronicleStatus.PARTIAL_CAPTURED)
+        if not isinstance(text, str) or not text.strip() or len(text) > 12_000:
+            return ChronicleResult(ChronicleStatus.INVALID_HOST_EVENT)
+
+        message_ref = f"{turn_id}:{actor.lower()}"
+        event = _HostEvent(message_ref, actor, sequence, text.encode("utf-8"))
+        try:
+            _, content_state, payload = _prepare(event, self.scanner)
+        except ValueError as exc:
+            return ChronicleResult(ChronicleStatus.INVALID_HOST_EVENT, reason=str(exc))
+        except Exception:
+            return ChronicleResult(ChronicleStatus.SECRET_SCAN_UNAVAILABLE)
+        object_id = _stable_uuid(f"B1N/message/v1/CODEX/{self.workspace}/{session_id}/{message_ref}")
+        outcome = self.store.append_canonical_event(CreateCanonicalIntent(
+            "CONVERSATION_MESSAGE", object_id, "1.0.0", _now(), f"b1n-message:{self.workspace}:{session_id}:{message_ref}",
+            _envelope("SYSTEM_OBSERVED", "OBSERVED", "OBSERVED", actor, {
+                "conversation_id": session_object_id, "host_id": "CODEX", "host_session_ref": session_id,
+                "host_message_ref": message_ref, "workspace": self.workspace, "sequence": sequence, "actor": actor,
+                "observed_at": None, "content_state": content_state, "capture_mode": "CODEX_HOOK_MESSAGE_ONLY",
+                "coverage": "PARTIAL", "source_refs": [],
+            }),
+            payload,
+        ))
+        if outcome.status == "IDEMPOTENCY_CONFLICT":
+            return ChronicleResult(ChronicleStatus.CONFLICTING_EVENT)
+        if outcome.status not in {"COMMITTED_LOCAL", "ALREADY_COMMITTED"}:
+            return ChronicleResult(ChronicleStatus.PERSISTENCE_FAILED, reason=outcome.status)
+        status = ChronicleStatus.ALREADY_CAPTURED if outcome.status == "ALREADY_COMMITTED" else ChronicleStatus.CAPTURED
+        return ChronicleResult(status, (CapturedMessage(object_id, actor, sequence, content_state),))
 
     def inspect_message(self, object_id: str) -> dict[str, object]:
         inspected = self.store.inspect_canonical("CONVERSATION_MESSAGE", object_id)

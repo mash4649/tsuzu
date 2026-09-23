@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from tsuzu.capability import Capability, CapabilityRegistry, CapabilityReport, VERIFIED
-from tsuzu.chronicle import AllowedObservation, ChronicleCapture, ChronicleStatus
+from tsuzu.chronicle import AllowedObservation, ChronicleCapture, ChronicleStatus, CodexHookChronicleCapture
 from tsuzu.vault import ActiveVaultLocator
 
 
@@ -125,6 +125,76 @@ class ChronicleCaptureTests(unittest.TestCase):
 
         self.assertEqual(unavailable.status, ChronicleStatus.CHRONICLE_CAPTURE_UNAVAILABLE)
         self.assertEqual(self.reader.calls, [])
+
+    def test_codex_hooks_capture_user_and_final_assistant_as_partial_chronicle(self):
+        capture = CodexHookChronicleCapture(self.locator, self.workspace)
+        user = capture.capture({
+            "hook_event_name": "UserPromptSubmit", "cwd": self.workspace,
+            "session_id": "codex-session", "turn_id": "turn-1", "prompt": "Use SQLite?",
+            "transcript_path": "/must/not/be/read",
+        })
+        assistant = capture.capture({
+            "hook_event_name": "Stop", "cwd": self.workspace,
+            "session_id": "codex-session", "turn_id": "turn-1",
+            "last_assistant_message": "SQLite fits this local app.", "stop_hook_active": False,
+            "transcript_path": "/must/not/be/read",
+        })
+
+        self.assertEqual(user.status, ChronicleStatus.CAPTURED)
+        self.assertEqual(assistant.status, ChronicleStatus.CAPTURED)
+        self.assertEqual([(item.actor, item.sequence) for item in (*user.messages, *assistant.messages)], [("USER", 0), ("ASSISTANT", 1)])
+        self.assertEqual(capture.inspect_message(user.messages[0].object_id)["capture_mode"], "CODEX_HOOK_MESSAGE_ONLY")
+        self.assertEqual(capture.inspect_message(assistant.messages[0].object_id)["coverage"], "PARTIAL")
+        self.assertEqual(capture.read_body(assistant.messages[0].object_id), b"SQLite fits this local app.")
+
+    def test_codex_hook_replay_is_idempotent_and_changed_message_conflicts(self):
+        capture = CodexHookChronicleCapture(self.locator, self.workspace)
+        event = {
+            "hook_event_name": "UserPromptSubmit", "cwd": self.workspace,
+            "session_id": "codex-session", "turn_id": "turn-1", "prompt": "first body",
+        }
+        first = capture.capture(event)
+        retry = capture.capture(event)
+        conflict = capture.capture({**event, "prompt": "changed body"})
+
+        self.assertEqual(first.status, ChronicleStatus.CAPTURED)
+        self.assertEqual(retry.status, ChronicleStatus.ALREADY_CAPTURED)
+        self.assertEqual(conflict.status, ChronicleStatus.CONFLICTING_EVENT)
+        self.assertEqual(capture.read_body(first.messages[0].object_id), b"first body")
+
+    def test_codex_hook_missing_or_intermediate_assistant_is_only_a_coverage_gap(self):
+        capture = CodexHookChronicleCapture(self.locator, self.workspace)
+        missing = capture.capture({
+            "hook_event_name": "Stop", "cwd": self.workspace,
+            "session_id": "codex-session", "turn_id": "turn-1",
+            "last_assistant_message": None, "stop_hook_active": False,
+        })
+        intermediate = capture.capture({
+            "hook_event_name": "Stop", "cwd": self.workspace,
+            "session_id": "codex-session", "turn_id": "turn-2",
+            "last_assistant_message": "not final", "stop_hook_active": True,
+        })
+
+        self.assertEqual(missing.status, ChronicleStatus.PARTIAL_CAPTURED)
+        self.assertEqual(intermediate.status, ChronicleStatus.PARTIAL_CAPTURED)
+        self.assertEqual(missing.messages, ())
+        self.assertEqual(intermediate.messages, ())
+
+    def test_codex_hook_wrong_project_and_secret_fail_closed(self):
+        capture = CodexHookChronicleCapture(self.locator, self.workspace)
+        wrong_scope = capture.capture({
+            "hook_event_name": "UserPromptSubmit", "cwd": "/work/other",
+            "session_id": "codex-session", "turn_id": "turn-1", "prompt": "do not capture",
+        })
+        restricted = capture.capture({
+            "hook_event_name": "UserPromptSubmit", "cwd": self.workspace,
+            "session_id": "codex-session", "turn_id": "turn-2", "prompt": "api_key=abcdefghijklmnopqrstuvwxyz",
+        })
+
+        self.assertEqual(wrong_scope.status, ChronicleStatus.NOT_CAPTURED_SCOPE)
+        self.assertEqual(restricted.status, ChronicleStatus.CAPTURED)
+        self.assertEqual(restricted.messages[0].content_state, "EXCLUDED_RESTRICTED")
+        self.assertIsNone(capture.read_body(restricted.messages[0].object_id))
 
 
 if __name__ == "__main__":

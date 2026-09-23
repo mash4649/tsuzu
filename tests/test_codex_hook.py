@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tsuzu.chronicle import CodexHookChronicleCapture
 from tsuzu.codex_hook import CodexPromptHook, StructuredUserEvent, TrustedIntentRegistry
 from tsuzu.desktop_ingress import DesktopDraftIngress, DesktopIngressStatus
 from tsuzu.index import IndexManager
@@ -37,7 +38,33 @@ class CodexPromptHookTests(unittest.TestCase):
         first = self.hook.handle(self.event("SQLite と Postgres のどちらを選ぶべきか", turn="turn-1"))
 
         self.assertEqual(first.capture_status, "COMMITTED_LOCAL")
+        self.assertEqual(first.chronicle_status, "CAPTURED")
         self.assertEqual(first.injected_source_ids, ())
+        self.assertEqual(self.hook.source_count(), 1)
+
+    def test_stop_hook_adds_final_assistant_message_to_same_chronicle_session(self):
+        user = self.hook.handle(self.event("SQLite を選ぶべきか", turn="turn-1"))
+        assistant = self.hook.handle({
+            "hook_event_name": "Stop", "cwd": str(self.project), "session_id": "session-a",
+            "turn_id": "turn-1", "last_assistant_message": "SQLite is simpler here.",
+            "stop_hook_active": False,
+        })
+
+        self.assertEqual(user.chronicle_status, "CAPTURED")
+        self.assertEqual(assistant.capture_status, "CAPTURED")
+        self.assertEqual(assistant.chronicle_status, "CAPTURED")
+        locator = ActiveVaultLocator(self.hook.control_root)
+        chronicle = CodexHookChronicleCapture(locator, self.project)
+        first_id = chronicle.capture({
+            "hook_event_name": "UserPromptSubmit", "cwd": str(self.project), "session_id": "session-a",
+            "turn_id": "turn-1", "prompt": "SQLite を選ぶべきか",
+        }).messages[0].object_id
+        assistant_id = chronicle.capture({
+            "hook_event_name": "Stop", "cwd": str(self.project), "session_id": "session-a",
+            "turn_id": "turn-1", "last_assistant_message": "SQLite is simpler here.", "stop_hook_active": False,
+        }).messages[0].object_id
+        self.assertEqual(chronicle.inspect_message(first_id)["actor"], "USER")
+        self.assertEqual(chronicle.inspect_message(assistant_id)["actor"], "ASSISTANT")
         self.assertEqual(self.hook.source_count(), 1)
 
     def test_decision_prompt_injects_only_preexisting_traceable_memory(self):
@@ -90,6 +117,12 @@ class CodexPromptHookTests(unittest.TestCase):
 
         self.assertEqual(self.hook.handle(bad_event).capture_status, "IGNORED_UNTRUSTED_EVENT")
         self.assertEqual(self.hook.handle(wrong_project).capture_status, "IGNORED_SCOPE")
+        wrong_project_stop = {
+            "hook_event_name": "Stop", "cwd": str(Path(self.temp.name)), "session_id": "session-a",
+            "turn_id": "turn-3", "last_assistant_message": "must not persist", "stop_hook_active": False,
+        }
+        self.assertEqual(self.hook.handle(wrong_project_stop).chronicle_status, "NOT_CAPTURED_SCOPE")
+        self.assertEqual(ActiveVaultLocator(self.hook.control_root).inspect_locator().status, "MISSING")
         self.assertEqual(self.hook.source_count(), 0)
 
     def test_disabled_passive_mode_still_captures_without_context(self):
