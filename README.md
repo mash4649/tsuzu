@@ -26,8 +26,8 @@ See [ADR-001](docs/decisions/ADR-001-python-stdlib-sqlite.md) for the implementa
 Mac TSUZU Core is the sole mutable Canonical writer. In the current baseline,
 that means Python `AtomicSourceWriter`/`SingleWriterWorker` owns the active
 Vault; Codex is an adapter over it. The Tauri shell's local text capture is a
-non-Canonical draft until a Core ingress adapter is implemented. It must not
-be treated as recallable TSUZU memory.
+non-Canonical draft until `tsuzu desktop-ingress` gives it a Core receipt. It
+must not be treated as recallable TSUZU memory before that receipt exists.
 
 ## Codex automatic memory and proposal
 

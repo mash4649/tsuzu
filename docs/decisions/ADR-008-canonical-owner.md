@@ -22,18 +22,20 @@ recovery connection to that runtime.
   `AtomicSourceWriter`/`SingleWriterWorker` over the active Vault.
 - **Codex:** a host adapter. Its automatic capture and recall use the Python
   Core path; it does not create a separate Canonical store.
-- **Tauri:** a desktop UI and native boundary. Until its Core adapter exists,
-  its local text capture is an explicitly non-Canonical capture draft. It must
-  not write `canonical/`, claim indexed/recallable state, or silently import
-  existing Vaults.
-- **Future Tauri integration:** submit a typed ingress request to the Python
-  Core/queue, then let the existing single writer materialize Canonical state.
+- **Tauri:** a desktop UI and native boundary. It persists an explicitly
+  non-Canonical capture draft and must not write `canonical/` or claim
+  indexed/recallable state before a Core receipt.
+- **Tauri Core adapter:** `tsuzu desktop-ingress` validates that app-local draft
+  as untrusted input, submits `CaptureRequest(LOCAL_TEXT)` to the existing
+  Python queue, and lets the existing single writer materialize and index it.
+  The receipt is written only after Core commit. The Tauri shell does not invoke
+  Python directly and has no shell or network permission.
 
 ## Consequences
 
 - There is one authority for Canonical mutation and recovery.
-- Tauri drafts are durable local input, not TSUZU memory; they require a
-  follow-up Core adapter before they become Canonical.
+- Tauri drafts are durable local input, not TSUZU memory; they become recallable
+  only after the Core receipt is present.
 - Existing app-local or Python data is not deleted, overwritten, or migrated by
   this decision.
 - A future TypeScript Core migration may replace the Python implementation,

@@ -49,6 +49,7 @@ export async function createCaptureDraftStore(
 
   return {
     async captureText(text: string) {
+      assertClearText(text);
       const { manifest, payload } = await createTextSource(text, {
         objectId: createId(),
         capturedAt: now(),
@@ -74,4 +75,29 @@ export async function createCaptureDraftStore(
       return { manifest, payload };
     },
   };
+}
+
+function assertClearText(text: string): void {
+  const patterns = [
+    /-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----/,
+    /-----BEGIN OPENSSH PRIVATE KEY-----/,
+    /(?:sk-|ghp_|xox[baprs]-|AKIA)[A-Za-z0-9_-]{16,}/,
+    /\bBearer\s+[A-Za-z0-9._~-]{16,}/,
+    /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/,
+    /\b(?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*["']?[A-Za-z0-9_./+=:-]{16,}/i,
+  ];
+  if (patterns.some((pattern) => pattern.test(text))) {
+    throw new Error("secret guard blocked input");
+  }
+  for (const candidate of text.match(/https?:\/\/[^\s<>"']+/gi) ?? []) {
+    let url: URL;
+    try {
+      url = new URL(candidate);
+    } catch {
+      continue;
+    }
+    if (url.username || url.password || [...url.searchParams].some(([key, value]) => ["access_token", "api_key", "apikey", "signature", "sig", "token"].includes(key.toLowerCase()) && value.length >= 16)) {
+      throw new Error("secret guard blocked input");
+    }
+  }
 }

@@ -103,4 +103,14 @@ describe("CaptureDraftStore", () => {
       "payload integrity mismatch",
     );
   });
+
+  it("refuses restricted text before creating a durable capture draft", async () => {
+    const storage = new MemoryStorage();
+    const store = await createCaptureDraftStore(storage);
+
+    await expect(store.captureText("api_key=abcdefghijklmnopqrstuvwxyz")).rejects.toThrow(
+      "secret guard blocked input",
+    );
+    expect(storage.binaryFiles).toEqual(new Map());
+  });
 });
