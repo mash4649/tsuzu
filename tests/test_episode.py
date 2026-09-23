@@ -6,6 +6,7 @@ from pathlib import Path
 
 from tsuzu.canonical import CanonicalStore, ObjectRegistration, ObjectRegistry, _parse_manifest
 from tsuzu.chronicle import CodexHookChronicleCapture
+from tsuzu.deletion import DeletionResolver
 from tsuzu.derived import DerivedJobQueue, DerivedJobRequest, DerivedStatus
 from tsuzu.episode import EpisodeDraft, EpisodeMessage, build_episode_inputs, complete_episode_job, persist_episode, segment_messages, validate_episode
 from tsuzu.vault import ActiveVaultLocator
@@ -39,6 +40,18 @@ class EpisodeTests(unittest.TestCase):
             self.assertTrue(all(item.observed_at.endswith("Z") for item in messages))
             self.assertEqual(len(episodes), 1)
             self.assertEqual(episodes[0].message_refs, ((user.messages[0].object_id, "USER"), (assistant.messages[0].object_id, "ASSISTANT")))
+
+            request = DerivedJobRequest("EPISODE_SEGMENT", refs, "b2-rules-v1", "local-v1", "GLOBAL", conversation_ref)
+            queue = DerivedJobQueue(root / "runtime", deletion_resolver=DeletionResolver(locator))
+            job = queue.enqueue(request)
+            queue.claim("worker", now="2026-09-24T00:00:00.000Z")
+            result = complete_episode_job(
+                queue, request, job.job_id, "worker", CanonicalStore(locator),
+                lambda current: segment_messages(build_episode_inputs(locator, conversation_ref)[0], "b2-rules-v1")[0],
+                lambda current: build_episode_inputs(locator, conversation_ref)[1] == current,
+            )
+
+            self.assertEqual(result.status, DerivedStatus.SUCCEEDED)
 
     def test_episode_job_requires_c4_preflight_then_settles_with_derived_output(self):
         with tempfile.TemporaryDirectory() as temp:
