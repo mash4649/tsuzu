@@ -49,6 +49,12 @@ class ClipDigestTests(unittest.TestCase):
         self.assertEqual(item["contentRole"], "UNTRUSTED_DATA")
         self.assertNotIn("noteText", item)
 
+    def test_list_returns_a_bounded_batch_with_truncation_signal(self):
+        self.notes.items = [ClipNote(f"note-{index}", f"clip {index}", f"https://example.test/{index}") for index in range(27)]
+        result = self.adapter.list_clips({})["structuredContent"]
+        self.assertEqual(len(result["items"]), 25)
+        self.assertTrue(result["truncated"])
+
     def test_inspection_only_fetches_a_url_attached_to_a_pending_note(self):
         item = self.adapter.list_clips({})["structuredContent"]["items"][0]
         inspected = self.adapter.inspect_url({"candidateId": item["candidateId"], "url": item["urls"][0]})["structuredContent"]
