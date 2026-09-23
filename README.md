@@ -20,3 +20,9 @@ The implementation starts with the Python standard library and SQLite. Contract-
 - `docs/20260909/TSUZU_P0_Final_Documentation_20260909_v2_1/` — product and contract source of truth
 
 See [ADR-001](docs/decisions/ADR-001-python-stdlib-sqlite.md) for the implementation baseline decision.
+
+## Codex automatic memory and proposal
+
+`.codex/hooks.json` registers a `UserPromptSubmit` hook. After you review and trust that hook in Codex, each clean user prompt is stored only in the local per-project Vault. A later decision prompt may receive up to three prior, policy-approved `UNTRUSTED_DATA` excerpts with a body-free trace; secrets, SENSITIVE, and RESTRICTED content are never injected.
+
+The hook never reads `transcript_path`, calls a network service, or performs actions. Set `TSUZU_CODEX_PASSIVE_RECALL=0` before starting Codex to keep automatic capture while disabling proposal context. Set `TSUZU_CODEX_DATA_ROOT` to an absolute local directory only when you intentionally want a different storage location.

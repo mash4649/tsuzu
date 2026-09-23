@@ -1,0 +1,17 @@
+{
+  "description": "TSUZU local-only Codex prompt memory and passive proposal hook.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/tsuzu_codex_turn.py\"",
+            "timeout": 10,
+            "statusMessage": "Saving TSUZU memory"
+          }
+        ]
+      }
+    ]
+  }
+}
