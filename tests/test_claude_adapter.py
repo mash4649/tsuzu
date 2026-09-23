@@ -3,9 +3,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from subprocess import CompletedProcess
+from unittest import mock
 
 from tsuzu.capability import Capability, CapabilityRegistry, CapabilityReport, EXPLICIT_RECALL, VERIFIED
-from tsuzu.claude_adapter import ClaudeHostAdapter, ClaudeMcpServer, McpInputError, McpUnavailableError, _version_at_least, serve_stdio
+from tsuzu.claude_adapter import ClaudeHostAdapter, ClaudeMcpServer, McpInputError, McpUnavailableError, _version_at_least, serve_stdio, verify_codex_capability
 from tsuzu.context import ContextBundleBuilder
 from tsuzu.index import IndexManager
 from tsuzu.retrieval import RetrievalService
@@ -123,6 +125,18 @@ class ClaudeHostAdapterTests(unittest.TestCase):
             "mcp", "serve", "--host", "codex", "--control-root", "control", "--index-root", "index", "--runtime-root", "runtime",
         ])
         self.assertEqual(args.host, "codex")
+
+    def test_codex_capability_requires_enabled_stdio_registration(self):
+        with mock.patch("tsuzu.claude_adapter.shutil.which", return_value="/usr/local/bin/codex"), mock.patch("tsuzu.claude_adapter.subprocess.run", side_effect=(
+            CompletedProcess(("codex", "--version"), 0, "codex-cli 0.144.1\n", ""),
+            CompletedProcess(("codex", "mcp", "get", "tsuzu"), 0, "tsuzu\n  enabled: true\n  transport: stdio\n", ""),
+        )):
+            self.assertEqual(verify_codex_capability().capabilities[0].state, VERIFIED)
+        with mock.patch("tsuzu.claude_adapter.shutil.which", return_value="/usr/local/bin/codex"), mock.patch("tsuzu.claude_adapter.subprocess.run", side_effect=(
+            CompletedProcess(("codex", "--version"), 0, "codex-cli 0.144.1\n", ""),
+            CompletedProcess(("codex", "mcp", "get", "tsuzu"), 1, "", "not found"),
+        )):
+            self.assertNotEqual(verify_codex_capability().capabilities[0].state, VERIFIED)
 
 
 if __name__ == "__main__":

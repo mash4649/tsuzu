@@ -188,15 +188,18 @@ def verify_claude_capability() -> CapabilityReport:
 
 def verify_codex_capability() -> CapabilityReport:
     version = "unavailable"
+    registration = ""
     if shutil.which("codex"):
         try:
             version = subprocess.run(["codex", "--version"], capture_output=True, text=True, timeout=5, check=False).stdout.strip().split()[-1]
+            result = subprocess.run(["codex", "mcp", "get", "tsuzu"], capture_output=True, text=True, timeout=5, check=False)
+            registration = result.stdout if result.returncode == 0 else ""
         except (OSError, subprocess.SubprocessError, IndexError):
             pass
-    state = VERIFIED if version != "unavailable" else UNVERIFIED
+    state = VERIFIED if version != "unavailable" and "enabled: true" in registration and "transport: stdio" in registration else UNVERIFIED
     return CapabilityReport(
         "codex", "CODEX", version, _now(),
-        "codex --version; MCP per-tool approval_mode=prompt",
+        "codex --version; codex mcp get tsuzu enabled stdio registration",
         (Capability(EXPLICIT_RECALL, state, ("GLOBAL",), ("approval_mode=prompt",)),),
         "TRUSTED_EXTERNAL",
     )
