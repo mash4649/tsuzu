@@ -1,8 +1,13 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from tsuzu.codex_hook import CodexPromptHook, StructuredUserEvent, TrustedIntentRegistry
+from tsuzu.desktop_ingress import DesktopDraftIngress, DesktopIngressStatus
+from tsuzu.index import IndexManager
+from tsuzu.source import create_source, parse_source
+from tsuzu.vault import ActiveVaultLocator
 
 
 class CodexPromptHookTests(unittest.TestCase):
@@ -93,6 +98,21 @@ class CodexPromptHookTests(unittest.TestCase):
         self.assertEqual(result.injected_source_ids, ())
         self.assertEqual(result.hook_output, {})
 
+    def test_projects_with_one_legacy_base_remain_in_separate_vaults(self):
+        other_project = Path(self.temp.name) / "other-project"
+        other_project.mkdir()
+        first = CodexPromptHook(Path(self.temp.name) / "data", self.project)
+        second = CodexPromptHook(Path(self.temp.name) / "data", other_project)
+
+        self.assertEqual(first.handle(self.event("first", turn="turn-1")).capture_status, "COMMITTED_LOCAL")
+        second_event = self.event("second", turn="turn-1")
+        second_event["cwd"] = str(other_project)
+
+        self.assertEqual(second.handle(second_event).capture_status, "COMMITTED_LOCAL")
+        self.assertNotEqual(first.root, second.root)
+        self.assertEqual(first.source_count(), 1)
+        self.assertEqual(second.source_count(), 1)
+
     def test_trusted_intent_token_is_event_bound_and_single_use(self):
         registry = TrustedIntentRegistry()
         event = StructuredUserEvent("CODEX", "session-a", "turn-a", str(self.project), "SQLite を選ぶべきか")
@@ -101,6 +121,47 @@ class CodexPromptHookTests(unittest.TestCase):
         self.assertTrue(registry.consume(token, event))
         self.assertFalse(registry.consume(token, event))
         self.assertFalse(registry.consume(registry.mint(event), StructuredUserEvent("CODEX", "session-b", "turn-a", str(self.project), "SQLite を選ぶべきか")))
+
+    def test_codex_and_tauri_share_one_core_queue_vault_and_index(self):
+        core_root = Path(self.temp.name) / "shared-core"
+        hook = CodexPromptHook(Path(self.temp.name) / "legacy", self.project, core_root=core_root)
+        locator = ActiveVaultLocator(core_root / "control")
+        hook._locator()
+        index = IndexManager(core_root / "index", locator)
+        index.open()
+        try:
+            app_local = Path(self.temp.name) / "app-local"
+            draft_id = "00000000-0000-4000-8000-000000000001"
+            manifest = create_source("Tauri からの記録", kind="TEXT", capture_method="LOCAL_TEXT", object_id=draft_id, captured_at="2026-09-23T00:00:00.000Z")
+            draft_root = app_local / "capture-drafts" / "sources" / draft_id
+            (draft_root / "payload").mkdir(parents=True)
+            (app_local / "capture-drafts" / "layout.json").write_text('{"format":"tsuzu-capture-draft-v1"}')
+            (draft_root / "source.md").write_text("---\n" + json.dumps(manifest) + "\n---\n")
+            (draft_root / "payload" / "original").write_text("Tauri からの記録")
+            ingress = DesktopDraftIngress(app_local, core_root / "queue", locator, index)
+            self.assertEqual(ingress.submit(draft_id).status, DesktopIngressStatus.QUEUED)
+
+            result = hook.handle(self.event("Codex からの記録", turn="shared-turn"))
+
+            self.assertEqual(result.capture_status, "COMMITTED_LOCAL")
+            self.assertEqual(ingress.materialize().status, DesktopIngressStatus.COMMITTED)
+            self.assertEqual(hook.source_count(), 2)
+            self.assertEqual(len(index.search("記録")), 2)
+            manifests = [parse_source(path.read_text()) for path in (core_root / "vault" / "canonical" / "sources").glob("*/source.md")]
+            self.assertIn("CODEX_USER_PROMPT", {manifest["source"]["capture_method"] for manifest in manifests})
+            self.assertIn("CODEX_TURN", {manifest["source"]["origin_locator"]["type"] for manifest in manifests})
+            recall = hook.handle(self.event("Tauri を選ぶべきか", turn="shared-recall"))
+            self.assertIn("Tauri からの記録", recall.hook_output["hookSpecificOutput"]["additionalContext"])
+            self.assertEqual(hook.handle(self.event("Codex からの記録", turn="shared-turn")).capture_status, "ALREADY_COMMITTED")
+            other_project = Path(self.temp.name) / "other-project"
+            other_project.mkdir()
+            other_hook = CodexPromptHook(Path(self.temp.name) / "legacy", other_project, core_root=core_root)
+            other_event = self.event("別プロジェクト", turn="other-turn")
+            other_event["cwd"] = str(other_project)
+            self.assertEqual(other_hook.handle(other_event).capture_status, "IGNORED_RUNTIME")
+            self.assertEqual(hook.source_count(), 3)
+        finally:
+            index.close()
 
 
 if __name__ == "__main__":

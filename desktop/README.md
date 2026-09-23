@@ -26,16 +26,17 @@ pnpm tauri build --bundles app
 
 ## Import a draft into the selected Core
 
-From the repository root, use the same `control` and `index` roots as the Codex
-project whose memory you intend to share. The command deliberately requires
-those paths: it never creates or guesses a second Vault.
+From the repository root, set the same absolute `TSUZU_CORE_ROOT` used by the
+Codex hook, then use its `control`, `queue`, and `index` paths. The command
+deliberately requires those paths: it never creates, guesses, or migrates a
+second Vault.
 
 ```sh
 PYTHONPATH=src python3 -m tsuzu desktop-ingress \
   --app-local-root "<Tauri AppLocalData root>" \
-  --queue-root "<that Core runtime queue root>" \
-  --control-root "<that Core control root>" \
-  --index-root "<that Core index root>"
+  --queue-root "$TSUZU_CORE_ROOT/queue" \
+  --control-root "$TSUZU_CORE_ROOT/control" \
+  --index-root "$TSUZU_CORE_ROOT/index"
 ```
 
 `QUEUED` means the durable draft has entered Core ingress but is not yet

@@ -20,10 +20,12 @@ def main() -> None:
         default = Path.home() / "Library" / "Application Support" / "TSUZU" / "codex-hooks"
         enabled = os.environ.get("TSUZU_CODEX_PASSIVE_RECALL", "1") == "1"
         data_root = Path(os.environ.get("TSUZU_CODEX_DATA_ROOT", default)).expanduser()
-        if not data_root.is_absolute():
+        configured_core = os.environ.get("TSUZU_CORE_ROOT")
+        core_root = Path(configured_core).expanduser() if configured_core else None
+        if not data_root.is_absolute() or (core_root is not None and not core_root.is_absolute()):
             print("{}")
             return
-        result = CodexPromptHook(data_root, ROOT, passive_enabled=enabled).handle(event)
+        result = CodexPromptHook(data_root, ROOT, passive_enabled=enabled, core_root=core_root).handle(event)
         print(json.dumps(result.hook_output, separators=(",", ":")))
     except Exception:
         print("{}")

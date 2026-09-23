@@ -20,8 +20,10 @@ recovery connection to that runtime.
 - **Canonical owner:** Mac TSUZU Core.
 - **Current implementation of that owner:** Python
   `AtomicSourceWriter`/`SingleWriterWorker` over the active Vault.
-- **Codex:** a host adapter. Its automatic capture and recall use the Python
-  Core path; it does not create a separate Canonical store.
+- **Codex:** a host adapter. Its automatic capture submits a typed
+  `CaptureRequest(CODEX_USER_PROMPT)` to A3 and lets A4 materialize it; recall
+  uses the same Python Core path. It does not call A2 or create a separate
+  Canonical store.
 - **Tauri:** a desktop UI and native boundary. It persists an explicitly
   non-Canonical capture draft and must not write `canonical/` or claim
   indexed/recallable state before a Core receipt.
@@ -38,6 +40,11 @@ recovery connection to that runtime.
   only after the Core receipt is present.
 - Existing app-local or Python data is not deleted, overwritten, or migrated by
   this decision.
+- `TSUZU_CORE_ROOT` selects one Core root (`control`, `queue`, `index`, and
+  `runtime`) for a configured project. The hook binds that root to a
+  body-free project hash and rejects another Codex project. It initializes only
+  an empty selected root; it never discovers, rewrites, or migrates a legacy
+  Vault.
 - A future TypeScript Core migration may replace the Python implementation,
   but it must replace the owner as one atomic ownership decision rather than
   adding a second writer.

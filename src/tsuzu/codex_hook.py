@@ -12,12 +12,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .capture import SecretScanner
+from .capture import CaptureRequest, CaptureService, CaptureStatus, SecretScanner
 from .context import ContextBundleBuilder
 from .index import IndexManager
 from .retrieval import RetrievalRequest, RetrievalService
 from .vault import ActiveVaultLocator
-from .writer import AtomicSourceWriter
+from .worker import SingleWriterWorker, WorkerStatus
 
 
 MAX_PROMPT_CHARS = 12_000
@@ -65,13 +65,14 @@ class TrustedIntentRegistry:
 class CodexPromptHook:
     """Persist one trusted Codex prompt, then optionally inject prior safe context."""
 
-    def __init__(self, data_root: str | Path, project_root: str | Path, *, passive_enabled: bool = True):
+    def __init__(self, data_root: str | Path, project_root: str | Path, *, passive_enabled: bool = True, core_root: str | Path | None = None):
         self.project_root = Path(project_root).resolve()
         self.data_root = Path(data_root).expanduser().resolve()
         self.passive_enabled = passive_enabled
-        self.root = self.data_root / hashlib.sha256(str(self.project_root).encode()).hexdigest()[:24]
+        self.root = Path(core_root).expanduser().resolve() if core_root is not None else self.data_root / hashlib.sha256(str(self.project_root).encode()).hexdigest()[:24]
         self.control_root = self.root / "control"
         self.vault_root = self.root / "vault"
+        self.queue_root = self.root / "queue"
         self.index_root = self.root / "index"
         self.runtime_root = self.root / "runtime"
         self.trace_root = self.runtime_root / "context-traces"
@@ -85,29 +86,31 @@ class CodexPromptHook:
             return HookResult("EXCLUDED_RESTRICTED")
         try:
             locator = self._locator()
+            self._assert_project_binding()
             index = IndexManager(self.index_root, locator)
             index.open()
         except Exception:
             return HookResult("IGNORED_RUNTIME")
         try:
-            writer = AtomicSourceWriter(locator)
-            source_id = _stable_uuid(f"codex-prompt/v1/{self.project_root}/{event.session_id}/{event.turn_id}")
-            if writer.inspect_source(source_id).status == "VALID":
-                return HookResult("ALREADY_COMMITTED")
+            capture = CaptureService(self.queue_root).capture(CaptureRequest(
+                request_id=_stable_uuid(f"codex-prompt-request/v1/{self.project_root}/{event.session_id}/{event.turn_id}"),
+                idempotency_key=f"tsuzu-codex-prompt/v1/{self.project_root}/{event.session_id}/{event.turn_id}",
+                kind="TEXT",
+                content=event.prompt,
+                capture_method="CODEX_USER_PROMPT",
+                origin_locator={"type": "CODEX_TURN", "value": _hash(f"{event.session_id}:{event.turn_id}")},
+            ))
+            if capture.status == CaptureStatus.REJECTED_RESTRICTED:
+                return HookResult("EXCLUDED_RESTRICTED")
+            if capture.status not in {CaptureStatus.ACCEPTED, CaptureStatus.ALREADY_ACCEPTED} or capture.source_id is None:
+                return HookResult("IGNORED_RUNTIME")
+            if capture.status == CaptureStatus.ALREADY_ACCEPTED:
+                return HookResult(self._materialize(locator, index, capture.source_id, False))
             try:
                 injected = self._passive_context(locator, index, event)
             except Exception:
                 injected = (), {}
-            capture = writer.create_source(
-                event.prompt,
-                kind="TEXT",
-                capture_method="CODEX_USER_PROMPT",
-                object_id=source_id,
-                origin_locator={"type": "CODEX_TURN", "value": _hash(f"{event.session_id}:{event.turn_id}")},
-            )
-            if capture.status in {"COMMITTED_LOCAL", "ALREADY_COMMITTED"}:
-                index.upsert_source(capture.source_id)
-            return HookResult(capture.status, *injected)
+            return HookResult(self._materialize(locator, index, capture.source_id, capture.status == CaptureStatus.ACCEPTED), *injected)
         except Exception:
             return HookResult("IGNORED_RUNTIME")
         finally:
@@ -140,6 +143,42 @@ class CodexPromptHook:
             self.vault_root.mkdir(parents=True, exist_ok=True, mode=0o700)
             locator.initialize(self.vault_root, operation_id=str(uuid.uuid4()))
         return locator
+
+    def _assert_project_binding(self) -> None:
+        path = self.runtime_root / "codex-project-binding.json"
+        expected = {"schema_version": "1.0.0", "project_hash": _hash(str(self.project_root))}
+        if path.is_symlink():
+            raise OSError("project binding is symlink")
+        if path.exists():
+            if json.loads(path.read_text()) != expected:
+                raise OSError("Core root belongs to a different Codex project")
+            return
+        self.runtime_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            with path.open("x", encoding="utf-8") as stream:
+                json.dump(expected, stream, sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        except FileExistsError:
+            self._assert_project_binding()
+
+    def _materialize(self, locator: ActiveVaultLocator, index: IndexManager, source_id: str, newly_queued: bool) -> str:
+        for _ in range(64):
+            result = SingleWriterWorker(self.queue_root, locator).run_once()
+            if result.status in {WorkerStatus.COMMITTED, WorkerStatus.ALREADY_COMMITTED}:
+                if result.source_id is not None:
+                    index.upsert_source(result.source_id)
+                if result.source_id == source_id:
+                    return "COMMITTED_LOCAL" if newly_queued else "ALREADY_COMMITTED"
+                continue
+            if result.status == WorkerStatus.IDLE:
+                return "ALREADY_COMMITTED" if not newly_queued else "QUEUED"
+            if result.source_id == source_id:
+                return "IGNORED_RUNTIME"
+            if result.status == WorkerStatus.WORKER_BUSY:
+                break
+        return "QUEUED"
 
     def _passive_context(self, locator: ActiveVaultLocator, index: IndexManager, event: StructuredUserEvent) -> tuple[tuple[str, ...], dict[str, object]]:
         if not self.passive_enabled or not _needs_proposal(event.prompt):

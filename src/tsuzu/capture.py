@@ -39,6 +39,7 @@ class CaptureRequest:
     capture_method: str | None = None
     provenance: dict[str, object] | None = None
     import_metadata: dict[str, object] | None = None
+    origin_locator: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -221,7 +222,7 @@ class CaptureService:
         if sensitivity == "RESTRICTED":
             return CaptureResult(CaptureStatus.REJECTED_RESTRICTED, reason="restricted sensitivity is not queueable")
         scope = _scope(request.user_metadata)
-        origin_locator = {"type": "URL", "value": raw.decode("utf-8")} if kind == "URL" else {"type": "NONE", "value": None}
+        origin_locator = _origin_locator(request.origin_locator, kind, raw)
         method = request.capture_method or f"LOCAL_{kind}"
         provenance = request.provenance
         import_metadata = request.import_metadata
@@ -384,6 +385,16 @@ def _scope(metadata: dict[str, object] | None) -> dict[str, object]:
     return value
 
 
+def _origin_locator(value: dict[str, object] | None, kind: str, raw: bytes) -> dict[str, str | None]:
+    if value is None:
+        return {"type": "URL", "value": raw.decode("utf-8")} if kind == "URL" else {"type": "NONE", "value": None}
+    if set(value) != {"type", "value"} or not isinstance(value["type"], str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", value["type"]):
+        raise ValueError("invalid origin locator")
+    if value["value"] is not None and (not isinstance(value["value"], str) or len(value["value"]) > 512):
+        raise ValueError("invalid origin locator")
+    return {"type": value["type"], "value": value["value"]}
+
+
 def _fingerprint(
     kind: str, digest: str, size: int, sensitivity: str, original_name: str | None, scope: dict[str, object], origin_locator: dict[str, object],
     *, capture_method: str | None = None, provenance: dict[str, object] | None = None, import_metadata: dict[str, object] | None = None,
@@ -425,7 +436,7 @@ def _validate_job(job: object, job_id: str) -> None:
 
 def _validate_ingress(kind: object, capture_method: object, provenance: object, import_metadata: object) -> None:
     allowed = {
-        "TEXT": {"LOCAL_TEXT", "IMPORT_APPLE_NOTES", "IMPORT_MARKDOWN", "IOS_SHARE_TEXT"},
+        "TEXT": {"LOCAL_TEXT", "CODEX_USER_PROMPT", "IMPORT_APPLE_NOTES", "IMPORT_MARKDOWN", "IOS_SHARE_TEXT"},
         "URL": {"LOCAL_URL", "IMPORT_APPLE_NOTES", "IMPORT_MARKDOWN", "IOS_SHARE_URL"},
         "FILE": {"LOCAL_FILE", "IMPORT_APPLE_NOTES", "IMPORT_MARKDOWN", "IOS_SHARE_FILE"},
     }
