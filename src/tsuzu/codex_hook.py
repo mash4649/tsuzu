@@ -65,13 +65,13 @@ class TrustedIntentRegistry:
 class CodexPromptHook:
     """Persist one trusted Codex prompt, then optionally inject prior safe context."""
 
-    def __init__(self, data_root: str | Path, project_root: str | Path, *, passive_enabled: bool = True, core_root: str | Path | None = None):
+    def __init__(self, data_root: str | Path, project_root: str | Path, *, passive_enabled: bool = True, core_root: str | Path | None = None, vault_root: str | Path | None = None):
         self.project_root = Path(project_root).resolve()
         self.data_root = Path(data_root).expanduser().resolve()
         self.passive_enabled = passive_enabled
         self.root = Path(core_root).expanduser().resolve() if core_root is not None else self.data_root / hashlib.sha256(str(self.project_root).encode()).hexdigest()[:24]
         self.control_root = self.root / "control"
-        self.vault_root = self.root / "vault"
+        self.vault_root = Path(vault_root or os.environ.get("TSUZU_VAULT_ROOT", self.root / "vault")).expanduser().resolve()
         self.queue_root = self.root / "queue"
         self.index_root = self.root / "index"
         self.runtime_root = self.root / "runtime"

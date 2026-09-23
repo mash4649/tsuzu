@@ -33,7 +33,7 @@ must not be treated as recallable TSUZU memory before that receipt exists.
 
 `.codex/hooks.json` registers a `UserPromptSubmit` hook. After you review and trust that hook in Codex, each clean user prompt is submitted through the local A3/A4 Core queue. A later decision prompt may receive up to three prior, policy-approved `UNTRUSTED_DATA` excerpts with a body-free trace; secrets, SENSITIVE, and RESTRICTED content are never injected.
 
-The hook never reads `transcript_path`, calls a network service, or performs actions. Set `TSUZU_CODEX_PASSIVE_RECALL=0` before starting Codex to keep automatic capture while disabling proposal context. To share one selected Core with Tauri, set `TSUZU_CORE_ROOT` to an absolute, per-project local directory; its `control`, `queue`, `index`, and `runtime` paths are the values passed to `tsuzu desktop-ingress`. The first Codex use binds that root to a body-free project hash and another project is rejected. Leaving it unset preserves the legacy per-project `TSUZU_CODEX_DATA_ROOT` layout. Neither mode migrates or rewrites an existing Vault.
+The hook never reads `transcript_path`, calls a network service, or performs actions. Set `TSUZU_CODEX_PASSIVE_RECALL=0` before starting Codex to keep automatic capture while disabling proposal context. To share the local Tauri Core and selected Vault, set `TSUZU_CORE_ROOT` to `/Users/mbp/Desktop/++++TSUZU/Core` and `TSUZU_VAULT_ROOT` to `/Users/mbp/Desktop/++++TSUZU/Vault` before starting Codex. The first Codex use binds that Core to a body-free project hash and another project is rejected. Leaving `TSUZU_CORE_ROOT` unset preserves the legacy per-project `TSUZU_CODEX_DATA_ROOT` layout. Neither mode migrates or rewrites an existing Vault.
 
 ## Apple Notes selected-note import
 

@@ -163,6 +163,20 @@ class CodexPromptHookTests(unittest.TestCase):
         finally:
             index.close()
 
+    def test_explicit_vault_root_is_used_with_a_shared_core(self):
+        core_root = Path(self.temp.name) / "shared-core"
+        vault_root = Path(self.temp.name) / "selected-vault"
+        hook = CodexPromptHook(
+            Path(self.temp.name) / "legacy",
+            self.project,
+            core_root=core_root,
+            vault_root=vault_root,
+        )
+
+        self.assertEqual(hook.handle(self.event("選択したVaultを使う", turn="custom-vault")).capture_status, "COMMITTED_LOCAL")
+        self.assertTrue((vault_root / "canonical" / "sources").is_dir())
+        self.assertFalse((core_root / "vault").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

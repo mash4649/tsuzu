@@ -12,3 +12,5 @@ dist/
 build/
 .env
 .env.*
+desktop/.sidecar-build/
+desktop/src-tauri/binaries/

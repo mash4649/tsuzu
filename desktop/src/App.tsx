@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   checkDesktopRuntime,
   type DesktopRuntimeStatus,
@@ -24,7 +25,29 @@ function App({
     setCaptureStatus("下書き保存中…");
     try {
       const captured = await captureTextSource(sourceText);
-      setCaptureStatus(`下書き保存・再読込・検証済み: ${captured.objectId}`);
+      setCaptureStatus(`下書き保存済み。Coreへ送信中… ${captured.objectId}`);
+      const result = await invoke<{ output: string }>("process_desktop_ingress");
+      const receipts = JSON.parse(result.output) as Array<{
+        draft_id?: string | null;
+        status: string;
+        source_id?: string | null;
+        reason?: string;
+      }>;
+      const receipt = receipts.find((entry) => entry.draft_id === captured.objectId);
+      const committed = Boolean(
+        receipt && ["COMMITTED", "ALREADY_COMMITTED"].includes(receipt.status),
+      );
+      if (committed && receipt) {
+        setCaptureStatus(`Core保存・索引反映済み: ${receipt.source_id ?? captured.objectId}`);
+      } else if (receipt && ["QUEUED", "ALREADY_QUEUED"].includes(receipt.status)) {
+        setCaptureStatus(`Core受付済み・未確定: ${receipt.status}`);
+      } else if (receipt?.status.startsWith("REJECTED")) {
+        setCaptureStatus(`Coreが受付を停止: ${receipt.reason || receipt.status}`);
+      } else if (receipt) {
+        setCaptureStatus(`Core処理を確認してください: ${receipt.status}`);
+      } else {
+        setCaptureStatus(`下書き保存・再読込・検証済み: ${captured.objectId}`);
+      }
       setSourceText("");
     } catch (error) {
       setCaptureStatus(
@@ -47,7 +70,7 @@ function App({
       <p aria-live="polite">{runtimeStatusLabel(runtimeStatus)}</p>
       <section aria-labelledby="capture-title">
         <h2 id="capture-title">Capture draft</h2>
-        <p>これはMac TSUZU CoreのCanonicalではありません。Core接続までのローカル下書きです。</p>
+        <p>入力は下書きとして検証された後、Mac TSUZU Coreの受付・保存状態を表示します。</p>
         <label htmlFor="source-text">保存するテキスト</label>
         <textarea
           id="source-text"
@@ -56,7 +79,7 @@ function App({
           rows={4}
         />
         <button type="button" onClick={handleCapture}>
-          下書きを保存して再検証
+          保存してCoreに記録
         </button>
         <p aria-live="polite">{captureStatus}</p>
       </section>
