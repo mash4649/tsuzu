@@ -7,6 +7,7 @@ from pathlib import Path
 
 from tsuzu.historical_import import AppleNotesAdapter, HistoricalItem, HistoricalImporter, MacOSAppleNotesBridge, MarkdownFolderAdapter
 from tsuzu.capture import CaptureRequest, CaptureService
+from tsuzu.index import IndexManager
 from tsuzu.worker import SingleWriterWorker, WorkerStatus
 from tsuzu.vault import ActiveVaultLocator
 from tsuzu.writer import AtomicSourceWriter
@@ -21,9 +22,12 @@ class HistoricalImporterTests(unittest.TestCase):
         self.locator = ActiveVaultLocator(Path(self.temp.name) / "control")
         self.locator.initialize(vault, operation_id="init")
         self.queue = Path(self.temp.name) / "queue"
-        self.importer = HistoricalImporter(self.queue, self.locator)
+        self.index = IndexManager(Path(self.temp.name) / "index", self.locator)
+        self.index.open()
+        self.importer = HistoricalImporter(self.queue, self.locator, self.index)
 
     def tearDown(self):
+        self.index.close()
         self.temp.cleanup()
 
     def item(self, body=b"first", modified="2026-09-22T00:00:00.000Z"):
@@ -98,7 +102,19 @@ class HistoricalImporterTests(unittest.TestCase):
         self.assertEqual(manifest["source"]["origin_locator"], {"type": "APPLE_NOTES", "value": item.source_url})
         self.assertEqual(manifest["source"]["original_name"], "Selected note")
         self.assertEqual(manifest["import"]["external_modified_at_observed"], "2026-09-22T00:00:00.000Z")
+        self.assertIn(session.source_ids[0], self.index.search("Selected note"))
         self.assertEqual(self.importer.import_items("APPLE_NOTES", [item]).already_imported_count, 1)
+
+    def test_index_failure_is_reported_and_duplicate_retry_repairs_projection(self):
+        upsert = self.index.upsert_source
+        self.index.upsert_source = lambda source_id: (_ for _ in ()).throw(OSError("index unavailable"))
+        first = self.importer.import_items("APPLE_NOTES", [self.item(b"index repair")])
+        self.assertEqual((first.committed_count, first.failed_count), (0, 1))
+        self.assertEqual(self.index.search("index repair"), [])
+        self.index.upsert_source = upsert
+        retry = self.importer.import_items("APPLE_NOTES", [self.item(b"index repair")])
+        self.assertEqual((retry.committed_count, retry.already_imported_count, retry.failed_count), (0, 1, 0))
+        self.assertIn(retry.source_ids[0], self.index.search("index repair"))
 
     def test_apple_notes_bridge_unavailable_or_malformed_result_makes_no_writes(self):
         for runner in (

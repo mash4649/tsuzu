@@ -9,7 +9,7 @@ from .clip_digest import AppleNotesClipBridge, ClipDigestAdapter
 from .context import ContextBundleBuilder
 from .desktop_ingress import DesktopDraftIngress
 from .historical_import import AppleNotesAdapter, HistoricalImporter
-from .index import IndexManager
+from .index import IndexCapabilityError, IndexManager
 from .retrieval import RetrievalService
 from .vault import ActiveVaultLocator
 
@@ -32,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     apple_notes = subparsers.add_parser("apple-notes-import")
     apple_notes.add_argument("--queue-root", required=True)
     apple_notes.add_argument("--control-root", required=True)
+    apple_notes.add_argument("--index-root")
     return parser
 
 
@@ -40,8 +41,13 @@ def main() -> None:
     locator = ActiveVaultLocator(args.control_root)
     if args.command == "apple-notes-import":
         try:
-            result = HistoricalImporter(args.queue_root, locator).import_items("APPLE_NOTES", AppleNotesAdapter().enumerate(), recent_n=1)
-        except ValueError:
+            index = IndexManager(args.index_root or locator.state_dir.parent / "index", locator)
+            index.open()
+            try:
+                result = HistoricalImporter(args.queue_root, locator, index).import_items("APPLE_NOTES", AppleNotesAdapter().enumerate(), recent_n=1)
+            finally:
+                index.close()
+        except (ValueError, IndexCapabilityError, OSError):
             print("ACTION_REQUIRED", file=sys.stderr)
             raise SystemExit(2)
         print(result.import_session_id, result.committed_count, result.already_imported_count, result.blocked_count, result.failed_count)

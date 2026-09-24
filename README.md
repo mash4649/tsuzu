@@ -40,10 +40,10 @@ The hook never reads `transcript_path`, calls a network service, or performs act
 Select exactly one note in the macOS Notes app, then run the user-initiated command below. It asks macOS for Notes Automation permission if needed, reads only that selection, and passes it through the existing local secret guard and single-writer queue. It never scans accounts, folders, or unselected notes; cancellation, denial, or malformed bridge output makes no Canonical write.
 
 ```sh
-PYTHONPATH=src python3 -m tsuzu apple-notes-import --queue-root /absolute/core/runtime/queue --control-root /absolute/core/control
+PYTHONPATH=src python3 -m tsuzu apple-notes-import --queue-root /absolute/core/runtime/queue --control-root /absolute/core/control --index-root /absolute/core/index
 ```
 
-The receipt summary is body-free. The Canonical Source retains the note title, observed modification time, and a hashed `x-apple-notes://selected/...` locator; the raw Notes identifier is kept only in the body-free import identity hash. Re-run the command for a changed selected note; an identical snapshot is idempotent.
+The receipt summary is body-free. The Canonical Source retains the note title, observed modification time, and a hashed `x-apple-notes://selected/...` locator; the raw Notes identifier is kept only in the body-free import identity hash. The Source is added to the local A5 index after commit, and an identical re-run repairs a missing index row without creating another Source. Re-run the command for a changed selected note; an identical snapshot is idempotent.
 
 ## Codex desktop Clip digest
 

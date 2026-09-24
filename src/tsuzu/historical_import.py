@@ -6,6 +6,7 @@ import hashlib
 import heapq
 import json
 import os
+import sqlite3
 import subprocess
 import uuid
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .capture import CaptureRequest, CaptureService, CaptureStatus, _fsync_directory, _validate_timestamp
+from .index import IndexCapabilityError, IndexManager
 from .vault import ActiveVaultLocator
 from .worker import SingleWriterWorker, WorkerStatus
 
@@ -134,9 +136,10 @@ class AppleNotesAdapter:
 
 
 class HistoricalImporter:
-    def __init__(self, queue_root: str | os.PathLike[str], locator: ActiveVaultLocator):
+    def __init__(self, queue_root: str | os.PathLike[str], locator: ActiveVaultLocator, index: IndexManager):
         self.queue_root = Path(queue_root)
         self.locator = locator
+        self.index = index
         self.last_source_ids: list[str] = []
 
     def import_items(
@@ -179,6 +182,9 @@ class HistoricalImporter:
                 receipt = self._read_receipt(fingerprint)
                 if receipt:
                     if receipt["terminal_state"] == "COMMITTED":
+                        if not self._index_source(receipt["source_id"]):
+                            failed += 1
+                            continue
                         already += 1
                         source_ids.append(receipt["source_id"])
                     else:
@@ -218,6 +224,9 @@ class HistoricalImporter:
                         continue
                     self._write_receipt(fingerprint, source_id, "COMMITTED")
                     self._write_head(adapter_id, item.external_item_key, source_id)
+                    if not self._index_source(source_id):
+                        failed += 1
+                        continue
                     if captured.status == CaptureStatus.ALREADY_ACCEPTED or result.status == WorkerStatus.ALREADY_COMMITTED:
                         already += 1
                     else:
@@ -234,6 +243,13 @@ class HistoricalImporter:
         result = ImportSessionResult(session_id, committed, already, blocked, skipped, failed, cancelled_result, tuple(source_ids), tuple(skipped_items), enumerated, eligible)
         self._write_session(adapter_id, recent_n, from_at, to_at, result)
         return result
+
+    def _index_source(self, source_id: str) -> bool:
+        try:
+            self.index.upsert_source(source_id)
+            return True
+        except (OSError, sqlite3.Error, IndexCapabilityError):
+            return False
 
     def _root(self, name: str) -> Path:
         path = self.locator.resolve_active_vault().root_ref / "system" / name
