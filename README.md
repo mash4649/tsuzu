@@ -45,7 +45,7 @@ PYTHONPATH=src python3 -m tsuzu apple-notes-import --queue-root /absolute/core/r
 
 The receipt summary is body-free. The Canonical Source retains the note title, observed modification time, and a hashed `x-apple-notes://selected/...` locator; the raw Notes identifier is kept only in the body-free import identity hash. Re-run the command for a changed selected note; an identical snapshot is idempotent.
 
-## ChatGPT Clip digest (developer mode)
+## Codex desktop Clip digest
 
 The separate `chatgpt` MCP host implements the `clip-digest` flow without changing the read-only historical importer above. On an explicit ChatGPT request it lists unprocessed links in Apple Notes `📥Clip`, lets ChatGPT inspect each linked public page through the bounded R1 fetcher, then writes a distilled draft to `<active-vault>/wiki/_inbox`. Only the Note title and link (not the Note body) and fetched public page text are returned to ChatGPT; known credential patterns are withheld. Drafts are not promoted to `wiki/cards`; low-value items can be marked processed without a card. A body-free local receipt prevents repeat work. Apple Notes itself is never edited, consistent with R3.
 
@@ -58,6 +58,6 @@ Run the local stdio server with the same Core paths used by the other TSUZU host
   --runtime-root /absolute/core/runtime
 ```
 
-ChatGPT cannot connect directly to a local MCP process. For private use, connect this stdio command through OpenAI Secure MCP Tunnel and create a Developer Mode custom app in ChatGPT. That requires an OpenAI Platform tunnel, runtime API key, and workspace permissions; TSUZU does not create or store them. Full write-action support is currently plan-gated (Business/Enterprise/Edu beta); Pro connections are read/fetch only. Until the app and tunnel are configured and tested from ChatGPT, this is locally verified MCP functionality, not a completed ChatGPT end-to-end integration.
+For this repository, `.codex/config.toml` registers that server as `tsuzu_clip` in the local Codex desktop app. Open this trusted project in Codex, restart the app or start a new task after changing MCP settings, and use `/mcp` to confirm the four Clip tools are available. The project-scoped registration uses the local Core and prompts for tool approval; it does not change the existing read-only `tsuzu` recall server. No web ChatGPT app or tunnel is needed for this path.
 
-Ask ChatGPT to list unprocessed `📥Clip` links, inspect each public page, and import useful findings as drafts or reject reviewed low-value links. `tsuzu_clip_list` returns at most 25 candidates; when `truncated` is true, call it again with `cursor` set to `nextCursor` until `truncated` is false. A fresh scan without a cursor includes any new candidates added during that review.
+Ask Codex to list unprocessed `📥Clip` links, inspect each public page, and import useful findings as drafts or reject reviewed low-value links. `tsuzu_clip_list` returns at most 25 candidates; when `truncated` is true, call it again with `cursor` set to `nextCursor` until `truncated` is false. A fresh scan without a cursor includes any new candidates added during that review. Actual Codex-side tool discovery and a Notes-to-draft round trip remain to be verified.

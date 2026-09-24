@@ -59,10 +59,10 @@ Claude Code Chronicle（`tsuzu-main-pb6.6.1`）と Web Chat Chronicle（`tsuzu-m
 19. `tsuzu-main-pb6.13` — R4 desktop verifier、paired-key registry/revocation、replay/expiry/tamper fail-closed、既存 outbox/A3/A4 への接続。
 20. `tsuzu-main-pb6.14` — iOS Share Extension の Keychain/Secure Enclave-class key lifecycle と実機 round trip。現リポジトリ外の mobile deliverable を明示し、desktop verifier (`pb6.13`) の fixture/live evidence に依存する。
 
-### 7. ChatGPT Clip 整理（Web Chat Chronicle とは別スコープ）
+### 7. Codex デスクトップ Clip 整理（Web 版は対象外）
 
 21. `tsuzu-main-pb6.15` — `tsuzu_clip_list` の25件超継続取得を可能にする。途中で処理済み receipt が増えても候補を飛ばさない。
-22. `tsuzu-main-pb6.16` — Secure MCP Tunnel と ChatGPT アプリの実接続、ツール発見、リンク先確認、下書き保存・重複防止を実ユーザー経路で検証する。アカウント権限とトンネル設定は外部ゲートとして明示する。
+22. `tsuzu-main-pb6.16` — Codex デスクトップのローカル MCP 登録、ツール発見、リンク先確認、下書き保存・重複防止を実ユーザー経路で検証する。Web 版とトンネルは対象外。
 
 ## Verification checkpoints
 

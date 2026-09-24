@@ -1,0 +1,5 @@
+[mcp_servers.tsuzu_clip]
+command = "./bin/tsuzu-mcp"
+args = ["mcp", "serve", "--host", "chatgpt", "--control-root", "~/Library/Application Support/TSUZU/control", "--index-root", "~/Library/Application Support/TSUZU/index", "--runtime-root", "~/Library/Application Support/TSUZU/runtime"]
+cwd = "."
+default_tools_approval_mode = "prompt"
