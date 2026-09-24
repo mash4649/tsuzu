@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from .capability import CapabilityRegistry
 from .claude_adapter import ClaudeHostAdapter, ClaudeMcpServer, serve_stdio, verify_claude_capability, verify_codex_capability, verify_cursor_capability
-from .clip_digest import AppleNotesClipBridge, ClipDigestAdapter
+from .clip_digest import AppleNotesClipBridge, ChatGPTNotesAdapter, ClipDigestAdapter, SelectedNoteBridge, SelectedNoteLinkAdapter
 from .context import ContextBundleBuilder
 from .desktop_ingress import DesktopDraftIngress
 from .historical_import import AppleNotesAdapter, HistoricalImporter
@@ -53,7 +54,14 @@ def main() -> None:
         print(result.import_session_id, result.committed_count, result.already_imported_count, result.blocked_count, result.failed_count)
         return
     if args.command == "mcp" and args.host == "chatgpt":
-        serve_stdio(ClaudeMcpServer(ClipDigestAdapter(AppleNotesClipBridge(), locator)))
+        index = IndexManager(Path(args.index_root).expanduser(), locator)
+        index.open()
+        try:
+            clips = ClipDigestAdapter(AppleNotesClipBridge(), locator)
+            selected = SelectedNoteLinkAdapter(SelectedNoteBridge(), locator, Path(args.runtime_root).expanduser() / "queue", index)
+            serve_stdio(ClaudeMcpServer(ChatGPTNotesAdapter(clips, selected)))
+        finally:
+            index.close()
         return
     index = IndexManager(args.index_root, locator)
     index.open()

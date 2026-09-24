@@ -176,7 +176,7 @@ def _http_transport(request: FetchRequest, address: str) -> FetchResult:
             return FetchResult("PERMANENT_FAILURE", failure_code="RESPONSE_DECOMPRESSED_TOO_LARGE")
         if time.monotonic() - started >= request.timeout_budget_ms / 1000:
             return FetchResult("TRANSIENT_FAILURE", failure_code="TOTAL_TIMEOUT")
-        media_type = response.get_content_type().lower()
+        media_type = response.headers.get_content_type().lower()
         return FetchResult.success(final_url=request.url, body=body, media_type=media_type, http_status=response.status)
     except (OSError, ValueError, http.client.HTTPException, zlib.error):
         if time.monotonic() - started >= request.timeout_budget_ms / 1000:

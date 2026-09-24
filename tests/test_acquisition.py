@@ -240,6 +240,9 @@ class AcquisitionTests(unittest.TestCase):
 
     def test_http_transport_does_not_follow_redirects_and_bounds_response_parts(self):
         with local_http_server() as port:
+            success = _http_transport(FetchRequest("44444444-aaaa-4444-8444-444444444444", "11111111-1111-4111-8111-111111111111", f"http://public.test:{port}/final"), "127.0.0.1")
+            self.assertEqual(success.status, "SUCCESS")
+            self.assertEqual(success.media_type, "text/plain")
             request = FetchRequest("ffffffff-ffff-4fff-8fff-ffffffffffff", "11111111-1111-4111-8111-111111111111", f"http://public.test:{port}/redirect")
             redirected = _http_transport(request, "127.0.0.1")
             self.assertEqual(redirected.status, "REDIRECT")
