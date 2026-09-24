@@ -54,6 +54,17 @@ class ClipDigestTests(unittest.TestCase):
         result = self.adapter.list_clips({})["structuredContent"]
         self.assertEqual(len(result["items"]), 25)
         self.assertTrue(result["truncated"])
+        self.assertEqual(result["nextCursor"], result["items"][-1]["candidateId"])
+        first = result["items"][0]
+        self.adapter.inspect_url({"candidateId": first["candidateId"], "url": first["urls"][0]})
+        self.adapter.reject_clip({"candidateId": first["candidateId"], "reason": "reviewed"})
+        continuation = self.adapter.list_clips({"cursor": result["nextCursor"]})["structuredContent"]
+        self.assertEqual(len(continuation["items"]), 2)
+        self.assertFalse(continuation["truncated"])
+        self.assertIsNone(continuation["nextCursor"])
+        self.assertTrue(all(item["candidateId"] > result["nextCursor"] for item in continuation["items"]))
+        with self.assertRaises(ClipDigestError):
+            self.adapter.list_clips({"cursor": "invalid"})
 
     def test_inspection_only_fetches_a_url_attached_to_a_pending_note(self):
         item = self.adapter.list_clips({})["structuredContent"]["items"][0]

@@ -4,7 +4,7 @@
 
 現状の TSUZU を、Mac TSUZU Core/Python single-writer を唯一の Canonical 所有者としたまま、Codex/Tauri の実運用経路、Derived knowledge、Discovery、Passive/Control Plane、Founder proof まで検証可能な順序で完成させる。タスクの正本は Beads であり、このファイルは順序付き index だけを持つ。
 
-Claude Code Chronicle（`tsuzu-main-pb6.6.1`）と Web Chat（`tsuzu-main-pb6.9.2`）は今回の対象外。既存 Beads を勝手に close/defer せず、Claude を除外した状態で完了を主張できない gate は明示的に保留する。
+Claude Code Chronicle（`tsuzu-main-pb6.6.1`）と Web Chat Chronicle（`tsuzu-main-pb6.9.2`）は今回の対象外。一方、ChatGPT アプリから明示的に依頼する Apple Notes Clip 整理は対象に含む。既存 Beads を勝手に close/defer せず、Claude を除外した状態で完了を主張できない gate は明示的に保留する。
 
 ## Architecture decisions
 
@@ -58,6 +58,11 @@ Claude Code Chronicle（`tsuzu-main-pb6.6.1`）と Web Chat（`tsuzu-main-pb6.9.
 18. `tsuzu-main-pb6.12` — Apple Notes の selected-note read-only bridge。既存の injected reader は test seam として残し、macOS 実ブリッジ・permission denied/cancel/idempotency を検証する。
 19. `tsuzu-main-pb6.13` — R4 desktop verifier、paired-key registry/revocation、replay/expiry/tamper fail-closed、既存 outbox/A3/A4 への接続。
 20. `tsuzu-main-pb6.14` — iOS Share Extension の Keychain/Secure Enclave-class key lifecycle と実機 round trip。現リポジトリ外の mobile deliverable を明示し、desktop verifier (`pb6.13`) の fixture/live evidence に依存する。
+
+### 7. ChatGPT Clip 整理（Web Chat Chronicle とは別スコープ）
+
+21. `tsuzu-main-pb6.15` — `tsuzu_clip_list` の25件超継続取得を可能にする。途中で処理済み receipt が増えても候補を飛ばさない。
+22. `tsuzu-main-pb6.16` — Secure MCP Tunnel と ChatGPT アプリの実接続、ツール発見、リンク先確認、下書き保存・重複防止を実ユーザー経路で検証する。アカウント権限とトンネル設定は外部ゲートとして明示する。
 
 ## Verification checkpoints
 

@@ -59,3 +59,5 @@ Run the local stdio server with the same Core paths used by the other TSUZU host
 ```
 
 ChatGPT cannot connect directly to a local MCP process. For private use, connect this stdio command through OpenAI Secure MCP Tunnel and create a Developer Mode custom app in ChatGPT. That requires an OpenAI Platform tunnel, runtime API key, and workspace permissions; TSUZU does not create or store them. Full write-action support is currently plan-gated (Business/Enterprise/Edu beta); Pro connections are read/fetch only. Until the app and tunnel are configured and tested from ChatGPT, this is locally verified MCP functionality, not a completed ChatGPT end-to-end integration.
+
+Ask ChatGPT to list unprocessed `📥Clip` links, inspect each public page, and import useful findings as drafts or reject reviewed low-value links. `tsuzu_clip_list` returns at most 25 candidates; when `truncated` is true, call it again with `cursor` set to `nextCursor` until `truncated` is false. A fresh scan without a cursor includes any new candidates added during that review.
