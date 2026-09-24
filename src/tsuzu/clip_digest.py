@@ -29,7 +29,8 @@ from .writer import AtomicSourceWriter
 MAX_NOTES = 25
 MAX_SCAN_NOTES = 1_000
 MAX_NOTE_CHARS = 12_000
-MAX_PAGE_CHARS = 24_000
+MAX_PAGE_CHARS = 64_000
+MAX_PAGE_BYTES = 5 * 1024 * 1024
 _CATEGORIES = {
     "コンテンツ制作", "媒体 / チャネル", "マーケティング / 発信",
     "顧客理解 / インサイト", "AI運用 / 自動化", "ツール",
@@ -194,7 +195,7 @@ class ClipDigestAdapter:
         parsed = urlparse(value["url"])
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ClipDigestError("unsupported URL")
-        fetched = self.fetcher.fetch(FetchRequest(str(uuid.uuid4()), str(uuid.uuid4()), value["url"], max_response_bytes=1_000_000))
+        fetched = self.fetcher.fetch(FetchRequest(str(uuid.uuid4()), str(uuid.uuid4()), value["url"], max_response_bytes=MAX_PAGE_BYTES))
         if not isinstance(fetched, FetchResult):
             return _result({"status": "UNAVAILABLE", "reason": "INVALID_RESULT", "contentRole": "UNTRUSTED_DATA"})
         if fetched.status != "SUCCESS":
@@ -404,7 +405,7 @@ class SelectedNoteLinkAdapter(ClipDigestAdapter):
             if committed.status not in {WorkerStatus.COMMITTED, WorkerStatus.ALREADY_COMMITTED} or committed.source_id != source_id:
                 return _result({"status": "RETRY_LATER", "reason": committed.status})
         reviewed = _ReviewedFetch(self.fetcher.adapter_id, self.fetcher.adapter_version, fetched)
-        acquired = self.acquisition.acquire(source_id, reviewed, max_response_bytes=1_000_000)
+        acquired = self.acquisition.acquire(source_id, reviewed, max_response_bytes=MAX_PAGE_BYTES)
         if acquired.status not in {"ACQUIRED", "ALREADY_ACQUIRED"}:
             return _result({"status": "BLOCKED" if acquired.status.startswith("BLOCKED") or acquired.status == "POLICY_BLOCKED" else "RETRY_LATER", "reason": acquired.status, "sourceId": source_id})
         try:

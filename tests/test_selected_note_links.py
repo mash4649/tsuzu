@@ -17,6 +17,7 @@ class Fetcher:
 
     def __init__(self):
         self.calls = 0
+        self.requests = []
         self.result = FetchResult.success(
             final_url="https://example.test/post",
             body=b"<html><p>Searchable public evidence</p></html>",
@@ -25,6 +26,7 @@ class Fetcher:
 
     def fetch(self, request):
         self.calls += 1
+        self.requests.append(request)
         return self.result
 
 
@@ -90,6 +92,27 @@ class SelectedNoteLinkTests(unittest.TestCase):
         restarted.inspect_url(args)
         self.assertEqual(restarted.import_source(args)["structuredContent"]["status"], "ALREADY_IMPORTED")
         self.assertEqual(len(list((self.vault / "canonical" / "sources").iterdir())), 1)
+
+    def test_large_x_article_fits_bounded_review_and_acquisition_limits(self):
+        self.note["body"] = '<a href="https://x.com/example/status/1">X post</a>'
+        item = self.adapter.list_clips({})["structuredContent"]["items"][0]
+        args = {"candidateId": item["candidateId"], "url": item["urls"][0]}
+        body = ("x" * 25_000).encode()
+        self.fetcher.result = FetchResult.success(final_url=args["url"], body=body, media_type="text/plain")
+        acquisition_limits = []
+        original_acquire = self.adapter.acquisition.acquire
+
+        def record_limit(source_id, adapter, *, max_response_bytes=5 * 1024 * 1024):
+            acquisition_limits.append(max_response_bytes)
+            return original_acquire(source_id, adapter, max_response_bytes=max_response_bytes)
+
+        self.adapter.acquisition.acquire = record_limit
+        inspected = self.adapter.inspect_url(args)["structuredContent"]
+        self.assertEqual(inspected["status"], "OK")
+        self.assertEqual(self.fetcher.requests[-1].max_response_bytes, 5 * 1024 * 1024)
+        self.assertEqual(len(inspected["content"]), 25_000)
+        self.adapter.import_source(args)
+        self.assertEqual(acquisition_limits, [5 * 1024 * 1024])
 
     def test_failed_or_unsafe_fetch_cannot_be_imported(self):
         item = self.adapter.list_clips({})["structuredContent"]["items"][0]
